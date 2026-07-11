@@ -45,7 +45,11 @@ func main() {
 		gen.FieldType("total_tickets", "int"),
 		gen.FieldType("ticket_price", "float64"),
 	)
+	generator.GenerateModel(
+		"users",
+		gen.FieldJSONTag("password_hash", "-"),
+	)
 	generator.Execute()
 
-	fmt.Println("generated database model for events")
+	fmt.Println("generated database models for events and users")
 }

@@ -32,7 +32,8 @@ Model generator vẫn có thể đọc trực tiếp config PostgreSQL. Biến m
 Migration dùng [Goose](https://github.com/pressly/goose) và được quản lý version
 trong bảng `goose_db_version`.
 
-- `migrations/001_create_events.sql`: gồm cả phần `-- +goose Up` và `-- +goose Down`.
+- `migrations/001_create_events.sql`: tạo bảng `events`.
+- `migrations/002_create_users.sql`: tạo bảng `users` và unique index cho email.
 
 Cài Goose CLI:
 
@@ -63,11 +64,11 @@ export DATABASE_URL='postgres://ticket:ticket@localhost:5432/ticket?sslmode=disa
 # 3. Tạo/cập nhật schema trước khi generate
 goose -dir migrations postgres "$DATABASE_URL" up
 
-# 4. Generate model từ các cột thật của bảng events
+# 4. Generate model từ các cột thật của bảng events và users
 go run ./tools/modelgen
 ```
 
-Lệnh trên sinh `shared/model/entity/events.gen.go`. DTO/validation của API nằm tại
+Lệnh trên sinh model trong `shared/model/entity/`. DTO/validation của API nằm tại
 `service/api/dto`. Không sửa trực tiếp file `*.gen.go`; sau mỗi lần thay đổi
 migration/schema, áp dụng migration rồi chạy lại `go run ./tools/modelgen`.
 
@@ -106,6 +107,24 @@ go test ./...
 Unit test dùng fake repository cục bộ nên không yêu cầu PostgreSQL. Khi chạy ứng dụng,
 `EventRepositoryImpl` là implementation PostgreSQL được sử dụng.
 
+## Seed users
+
+Thêm 100.000 user mẫu vào PostgreSQL (script tự chạy migration trước khi insert):
+
+```bash
+go run ./scripts/seed_users
+```
+
+Mặc định user dùng mật khẩu `password123`, được lưu dưới dạng bcrypt hash. Có thể đổi
+mật khẩu và kích thước batch bằng biến môi trường/flags:
+
+```bash
+SEED_USER_PASSWORD='another-password' go run ./scripts/seed_users \
+  -count 100000 -batch-size 1000
+```
+
+Mỗi lần chạy tạo một prefix email riêng nên có thể seed nhiều lần mà không trùng email.
+
 ## Cấu trúc source code
 
 ```text
@@ -130,4 +149,5 @@ shared/
     impl/                  # PostgreSQL repository implementation
 migrations/               # Các file SQL migration độc lập với source code
 tools/modelgen/           # Generator model từ schema PostgreSQL
+scripts/seed_users/       # Seed user mẫu theo batch
 ```
