@@ -1,0 +1,19 @@
+# Environment and local configuration
+.env
+.env.*
+!.env.example
+
+# Editors and IDEs
+.idea/
+.vscode/
+*.swp
+
+# Go build and test artifacts
+/bin/
+*.test
+*.out
+coverage.html
+
+# OS metadata
+.DS_Store
+Thumbs.db
