@@ -34,6 +34,7 @@ trong bảng `goose_db_version`.
 
 - `migrations/001_create_events.sql`: tạo bảng `events`.
 - `migrations/002_create_users.sql`: tạo bảng `users` và unique index cho email.
+- `migrations/003_create_tickets.sql`: tạo bảng `tickets`, liên kết user với event.
 
 Cài Goose CLI:
 
@@ -64,7 +65,7 @@ export DATABASE_URL='postgres://ticket:ticket@localhost:5432/ticket?sslmode=disa
 # 3. Tạo/cập nhật schema trước khi generate
 goose -dir migrations postgres "$DATABASE_URL" up
 
-# 4. Generate model từ các cột thật của bảng events và users
+# 4. Generate model từ các cột thật của bảng events, users và tickets
 go run ./tools/modelgen
 ```
 

@@ -49,7 +49,8 @@ func main() {
 		"users",
 		gen.FieldJSONTag("password_hash", "-"),
 	)
+	generator.GenerateModel("tickets")
 	generator.Execute()
 
-	fmt.Println("generated database models for events and users")
+	fmt.Println("generated database models for events, users and tickets")
 }
