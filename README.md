@@ -109,6 +109,7 @@ migration/schema, áp dụng migration rồi chạy lại `go run ./tools/modelg
 | `PUT` | `/events/{id}` | Cập nhật toàn bộ event |
 | `DELETE` | `/events/{id}` | Xóa event |
 | `POST` | `/tickets/pending` | Giữ một vé trên Redis và gửi yêu cầu pending vào Kafka |
+| `POST` | `/tickets/confirm` | Xác nhận một pending ticket qua Kafka |
 
 Ví dụ tạo event:
 
@@ -150,15 +151,31 @@ trỏ tới một `order_id`, API trả ngay `202 Accepted` với `ticket_id` đ
 tra tồn kho hoặc publish lại. Nếu cache miss, API đọc event từ Redis để kiểm tra còn
 vé nhưng không giảm tồn kho, sinh UUID rồi publish `UpdatedTicket` vào topic Kafka
 `ticket` với key là `event_id % 100`. Sau khi publish thành công, API cập nhật ngay
-mapping từ client order sang UUID; worker tiếp tục cập nhật tồn kho, snapshot ticket
-và sửa lại cache khi xử lý hoặc reconcile.
+mapping từ client order sang UUID; worker tiếp tục cập nhật tồn kho, snapshot pending
+ticket và sửa lại cache khi xử lý hoặc reconcile.
 Nếu hết vé, API trả `409 Conflict` với `{"error":"tickets sold out"}`.
+
+### Confirm ticket
+
+```bash
+curl -i -X POST http://localhost:8080/tickets/confirm \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "user_id": 10,
+    "ticket_id": "c7bca801-a080-45c9-972c-860cd4e44ab6"
+  }'
+```
+
+API đọc snapshot tại `tickets:{ticket_id}`. Ticket không tồn tại trả `404`; ticket
+không thuộc user trả `403`; ticket không còn `pending` trả `409`. Ticket hợp lệ được
+publish lên Kafka với status `confirm` và API trả `202 Accepted`.
 
 ## Ticket worker
 
 Khi khởi động, worker đọc các event còn hơn một ngày mới kết thúc và có
 `event_id % 100` thuộc `message_keys`, rồi đồng bộ snapshot `events:{event_id}`, số
-vé còn lại `tickets:reserved:{event_id}` và cache order của các event đó sang Redis.
+vé còn lại `tickets:reserved:{event_id}`, pending ticket và client-order mapping của
+các event đó sang Redis.
 Redis không phải source of truth; nếu Redis down hoặc cache miss, worker query
 PostgreSQL và tiếp tục xử lý.
 
@@ -172,11 +189,11 @@ duyệt message theo thứ tự nhận:
   status `cancelled`.
 
 Ticket và event stats của cả batch được ghi trong cùng một PostgreSQL transaction.
-Sau commit, worker refresh Redis rồi mới commit Kafka offset. Mỗi order được cache đầy
-đủ tại `tickets:{order_id}`; key
-`tickets:client-order-id:{user_id}:{client_order_id}` trỏ tới `order_id`. Duplicate
-hoặc message không đúng state được bỏ qua, nên batch có thể retry theo cơ chế
-at-least-once.
+Sau commit, worker refresh Redis rồi mới commit Kafka offset. Pending order được cache
+đầy đủ tại `tickets:{order_id}`. Khi order hoàn tất, worker xóa snapshot này nhưng giữ
+key `tickets:client-order-id:{user_id}:{client_order_id}` trỏ tới done ticket ID.
+Duplicate hoặc message không đúng state được bỏ qua, nên batch có thể retry theo cơ
+chế at-least-once.
 
 ## Test
 

@@ -15,6 +15,11 @@ import (
 	"ticket/shared/model/entity"
 )
 
+const (
+	ticketStatusPending = "pending"
+	ticketStatusConfirm = "confirm"
+)
+
 type TicketHandler struct {
 	ticketCache TicketCache
 	eventCache  EventCache
@@ -23,6 +28,7 @@ type TicketHandler struct {
 
 type TicketCache interface {
 	GetOrderID(ctx context.Context, userID int64, clientOrderID string) (uuid.UUID, error)
+	GetTicketByID(ctx context.Context, ticketID uuid.UUID) (entity.Ticket, error)
 	SetOrderID(ctx context.Context, userID int64, clientOrderID string, orderID uuid.UUID) error
 }
 
@@ -76,7 +82,7 @@ func (handler *TicketHandler) CreatePendingTicket(w http.ResponseWriter, r *http
 		UserID:        input.UserID,
 		EventID:       input.EventID,
 		ClientOrderID: clientOrderID,
-		Status:        "pending",
+		Status:        ticketStatusPending,
 	}
 	if err := handler.publisher.Publish(r.Context(), message); err != nil {
 		apierror.Write(w, err)
@@ -92,4 +98,44 @@ func (handler *TicketHandler) CreatePendingTicket(w http.ResponseWriter, r *http
 	apiresponse.Write(w, http.StatusAccepted, dto.PendingTicket{
 		TicketID: message.ID,
 	})
+}
+
+func (handler *TicketHandler) ConfirmTicket(w http.ResponseWriter, r *http.Request) {
+	input, err := validation.ValidateConfirmTicket(r)
+	if err != nil {
+		apierror.Write(w, err)
+		return
+	}
+
+	ticket, err := handler.ticketCache.GetTicketByID(r.Context(), input.TicketID)
+	if err != nil {
+		apierror.Write(w, err)
+		return
+	}
+	if ticket.ID == uuid.Nil {
+		apierror.Write(w, apierror.New(http.StatusNotFound, "ticket not found"))
+		return
+	}
+	if ticket.Status != ticketStatusPending {
+		apierror.Write(w, apierror.New(http.StatusConflict, "ticket is not pending"))
+		return
+	}
+	if ticket.UserID != input.UserID {
+		apierror.Write(w, apierror.New(http.StatusForbidden, "ticket does not belong to user"))
+		return
+	}
+
+	message := kafka.UpdatedTicket{
+		ID:            ticket.ID,
+		UserID:        ticket.UserID,
+		EventID:       ticket.EventID,
+		ClientOrderID: ticket.ClientOrderID,
+		Status:        ticketStatusConfirm,
+	}
+	if err := handler.publisher.Publish(r.Context(), message); err != nil {
+		apierror.Write(w, err)
+		return
+	}
+
+	apiresponse.Write(w, http.StatusAccepted, dto.PendingTicket{TicketID: ticket.ID})
 }

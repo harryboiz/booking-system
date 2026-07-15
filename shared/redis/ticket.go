@@ -60,6 +60,24 @@ func (cache *TicketCache) GetOrderID(
 	return orderID, nil
 }
 
+func (cache *TicketCache) GetTicketByID(
+	ctx context.Context,
+	ticketID uuid.UUID,
+) (entity.Ticket, error) {
+	encoded, err := cache.client.Get(ctx, OrderKey(ticketID)).Result()
+	if err != nil {
+		if err == goredis.Nil {
+			return entity.Ticket{}, nil
+		}
+		return entity.Ticket{}, fmt.Errorf("get ticket %s from redis: %w", ticketID, err)
+	}
+	var ticket entity.Ticket
+	if err := json.Unmarshal([]byte(encoded), &ticket); err != nil {
+		return entity.Ticket{}, fmt.Errorf("decode ticket %s from redis: %w", ticketID, err)
+	}
+	return ticket, nil
+}
+
 func (cache *TicketCache) SetOrderID(
 	ctx context.Context,
 	userID int64,
@@ -77,8 +95,8 @@ func (cache *TicketCache) SetOrderID(
 	return nil
 }
 
-// SetTicket stores complete ticket snapshots and their client-order lookups atomically.
-// A completed order overwrites the pending snapshot under the same order ID.
+// SetTicket stores pending ticket snapshots and client-order lookups atomically.
+// A completed ticket removes its pending snapshot but keeps the lookup pointing to its ID.
 func (cache *TicketCache) SetTicket(
 	ctx context.Context,
 	pendingOrders []entity.Ticket,
@@ -98,11 +116,7 @@ func (cache *TicketCache) SetTicket(
 		pipe.Set(ctx, ClientOrderIDKey(order.UserID, order.ClientOrderID), order.ID.String(), 0)
 	}
 	for _, order := range doneOrders {
-		encoded, err := json.Marshal(order)
-		if err != nil {
-			return fmt.Errorf("encode order %s for redis: %w", order.ID, err)
-		}
-		pipe.Set(ctx, OrderKey(order.ID), encoded, 0)
+		pipe.Del(ctx, OrderKey(order.ID))
 		pipe.Set(ctx, ClientOrderIDKey(order.UserID, order.ClientOrderID), order.ID.String(), 0)
 	}
 	if _, err := pipe.Exec(ctx); err != nil {

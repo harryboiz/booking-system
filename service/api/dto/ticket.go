@@ -14,6 +14,21 @@ type PendingTicketInput struct {
 	ClientOrderID string `json:"client_order_id"`
 }
 
+type ConfirmTicketInput struct {
+	UserID   int64     `json:"user_id"`
+	TicketID uuid.UUID `json:"ticket_id"`
+}
+
+func (input ConfirmTicketInput) Validate() error {
+	if input.UserID <= 0 {
+		return errors.New("user_id must be a positive integer")
+	}
+	if input.TicketID == uuid.Nil {
+		return errors.New("ticket_id is required")
+	}
+	return nil
+}
+
 func (input PendingTicketInput) Validate() error {
 	if input.UserID <= 0 {
 		return errors.New("user_id must be a positive integer")

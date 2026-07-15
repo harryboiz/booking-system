@@ -29,4 +29,5 @@ func registerEventRoutes(mux *http.ServeMux, eventHandler *handler.EventHandler)
 
 func registerTicketRoutes(mux *http.ServeMux, ticketHandler *handler.TicketHandler) {
 	mux.HandleFunc("POST /tickets/pending", ticketHandler.CreatePendingTicket)
+	mux.HandleFunc("POST /tickets/confirm", ticketHandler.ConfirmTicket)
 }
