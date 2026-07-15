@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"log/slog"
 	"os"
@@ -40,9 +41,19 @@ func main() {
 		slog.Error("cannot access database connection pool", "error", err)
 		os.Exit(1)
 	}
-	defer sqlDB.Close()
+	defer func(sqlDB *sql.DB) {
+		err := sqlDB.Close()
+		if err != nil {
+
+		}
+	}(sqlDB)
 	cache := sharedredis.NewEventCache(cfg.Redis.Address, cfg.Redis.Password, cfg.Redis.DB)
-	defer cache.Close()
+	defer func(cache *sharedredis.EventCache) {
+		err := cache.Close()
+		if err != nil {
+
+		}
+	}(cache)
 	ticketRepository := repositoryimpl.NewTicketRepository(db)
 	processor := worker.NewProcessor(ticketRepository, cache, cancelAfter, slog.Default())
 
@@ -53,9 +64,12 @@ func main() {
 		os.Exit(1)
 	}
 	consumer, err := sharedkafka.NewConsumer(ctx, sharedkafka.ConsumerConfig{
-		Brokers: cfg.Kafka.Brokers, Topic: cfg.Kafka.Topic,
-		GroupID: cfg.Settings.GroupID, MessageKeys: cfg.Settings.MessageKeys,
-		BatchSize: cfg.Settings.BatchSize, BatchWait: batchWait,
+		Brokers: cfg.Kafka.Brokers,
+		Topic: cfg.Kafka.Topic,
+		GroupID: cfg.Settings.GroupID,
+		MessageKeys: cfg.Settings.MessageKeys,
+		BatchSize: cfg.Settings.BatchSize,
+		BatchWait: batchWait,
 	}, processor, slog.Default())
 	if err != nil {
 		slog.Error("cannot initialize kafka consumer", "error", err)

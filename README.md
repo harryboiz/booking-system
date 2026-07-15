@@ -159,7 +159,7 @@ với `{"error":"tickets sold out"}`.
 
 ## Ticket worker
 
-Khi khởi động, worker recompute stats trong PostgreSQL cho các event có
+Khi khởi động, worker đọc các event còn hơn một ngày mới kết thúc và có
 `event_id % 100` thuộc `message_keys`, rồi đồng bộ snapshot `events:{event_id}` và số
 vé còn lại `tickets:reserved:{event_id}` sang Redis. Redis không phải source of truth;
 nếu Redis down hoặc cache miss, worker query PostgreSQL và tiếp tục xử lý.

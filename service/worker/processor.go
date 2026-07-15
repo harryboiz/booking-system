@@ -52,13 +52,15 @@ func NewProcessor(
 	return &Processor{repository: repository, cache: cache, cancelAfter: cancelAfter, logger: logger}
 }
 
-// Reconcile rebuilds PostgreSQL counters and Redis snapshots for this worker's shards.
+// Reconcile refreshes Redis snapshots for this worker's shards from PostgreSQL.
 func (processor *Processor) Reconcile(ctx context.Context, messageKeys []int) error {
-	events, err := processor.repository.ReconcileEventStats(ctx, messageKeys)
+	events, err := processor.repository.FindEventsByMessageKeys(
+		ctx, messageKeys, int(sharedkafka.MessageKeyCount),
+	)
 	if err != nil {
 		return err
 	}
-	processor.updateCache(ctx, events)
+	processor.updateEventCache(ctx, events)
 	return nil
 }
 
@@ -67,59 +69,25 @@ func (processor *Processor) Process(ctx context.Context, records []kafkago.Messa
 	if len(decoded) == 0 {
 		return nil
 	}
+
 	eventIDs := uniqueEventIDs(decoded)
-	availableEvents, err := processor.loadEventSnapshots(ctx, eventIDs)
-	if err != nil {
-		return err
-	}
-	filtered := decoded[:0]
-	for _, message := range decoded {
-		if _, exists := availableEvents[message.ticket.EventID]; exists {
-			filtered = append(filtered, message)
-		} else {
-			processor.logger.Warn("skip ticket for unknown event", "event_id", message.ticket.EventID)
-		}
-	}
-	if len(filtered) == 0 {
-		return nil
-	}
-
-	pendingTickets, deletePendingTickets, doneTickets, updatedEventStats, err :=
-		processor.processTransaction(ctx, filtered)
-	if err != nil {
-		return err
-	}
-	if err := processor.repository.PersistTicketChanges(
-		ctx, pendingTickets, deletePendingTickets, doneTickets, updatedEventStats,
-	); err != nil {
-		return err
-	}
-	processor.updateCache(ctx, updatedEventStats)
-	return nil
-}
-
-func (processor *Processor) processTransaction(
-	ctx context.Context,
-	messages []decodedMessage,
-) ([]entity.Ticket, []entity.Ticket, []entity.TicketDone, []entity.Event, error) {
-	eventIDs := uniqueEventIDs(messages)
 	events, err := processor.repository.FindEventsByIDs(ctx, eventIDs)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return err
 	}
 	eventByID := make(map[int64]*entity.Event, len(events))
 	for index := range events {
 		eventByID[events[index].ID] = &events[index]
 	}
 
-	ticketIDs := uniqueTicketIDs(messages)
+	ticketIDs := uniqueTicketIDs(decoded)
 	activeTickets, err := processor.repository.FindPendingTicketsByIDs(ctx, ticketIDs)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return err
 	}
 	doneTickets, err := processor.repository.FindDoneTicketsByIDs(ctx, ticketIDs)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return err
 	}
 	activeByID := make(map[uuid.UUID]*entity.Ticket, len(activeTickets))
 	for index := range activeTickets {
@@ -135,7 +103,7 @@ func (processor *Processor) processTransaction(
 	pendingTickets := make([]entity.Ticket, 0)
 	deletePendingTickets := make([]entity.Ticket, 0)
 	newDoneTickets := make([]entity.TicketDone, 0)
-	for _, message := range messages {
+	for _, message := range decoded {
 		event := eventByID[message.ticket.EventID]
 		if event == nil {
 			continue
@@ -153,29 +121,36 @@ func (processor *Processor) processTransaction(
 				createdAt = now
 			}
 			ticket := entity.Ticket{
-				ID: message.ticket.ID, EventID: message.ticket.EventID,
-				UserID: message.ticket.UserID, ClientOrderID: message.ticket.ClientOrderID,
-				Status: statusPending, CreatedAt: createdAt, UpdatedAt: now,
+				ID:            message.ticket.ID,
+				EventID:       message.ticket.EventID,
+				UserID:        message.ticket.UserID,
+				ClientOrderID: message.ticket.ClientOrderID,
+				Status:        statusPending,
+				CreatedAt:     createdAt,
+				UpdatedAt:     now,
 			}
 			pendingTickets = append(pendingTickets, ticket)
-			activeByID[ticket.ID] = &ticket
 			event.PendingTickets++
 			changed[event.ID] = event
 
 		case statusConfirm:
+			if _, exists := doneByID[message.ticket.ID]; exists {
+				continue
+			}
 			active := activeByID[message.ticket.ID]
 			if active == nil || active.Status != statusPending || active.EventID != message.ticket.EventID {
 				continue
 			}
 			deletePendingTickets = append(deletePendingTickets, *active)
 			newDoneTickets = append(newDoneTickets, completedTicket(active, statusConfirm, now))
-			delete(activeByID, active.ID)
-			doneByID[active.ID] = struct{}{}
-			decrementPending(event)
+			event.PendingTickets--
 			event.ConfirmTickets++
 			changed[event.ID] = event
 
 		case statusCancel:
+			if _, exists := doneByID[message.ticket.ID]; exists {
+				continue
+			}
 			active := activeByID[message.ticket.ID]
 			if !canCancel(active, message.ticket.EventID, now, processor.cancelAfter) {
 				continue
@@ -183,8 +158,7 @@ func (processor *Processor) processTransaction(
 			deletePendingTickets = append(deletePendingTickets, *active)
 			newDoneTickets = append(newDoneTickets, completedTicket(active, statusCancelled, now))
 			delete(activeByID, active.ID)
-			doneByID[active.ID] = struct{}{}
-			decrementPending(event)
+			event.PendingTickets--
 			event.CancelTickets++
 			changed[event.ID] = event
 		}
@@ -196,14 +170,24 @@ func (processor *Processor) processTransaction(
 		event.UpdatedAt = now
 		updatedEventStats = append(updatedEventStats, *event)
 	}
-	return pendingTickets, deletePendingTickets, newDoneTickets, updatedEventStats, nil
+	if err := processor.repository.PersistTicketChanges(
+		ctx, pendingTickets, deletePendingTickets, newDoneTickets, updatedEventStats,
+	); err != nil {
+		return err
+	}
+	processor.updateEventCache(ctx, updatedEventStats)
+	return nil
 }
 
 func completedTicket(ticket *entity.Ticket, status string, now time.Time) entity.TicketDone {
 	return entity.TicketDone{
-		ID: ticket.ID, EventID: ticket.EventID, UserID: ticket.UserID,
-		ClientOrderID: ticket.ClientOrderID, Status: status,
-		CreatedAt: ticket.CreatedAt, UpdatedAt: now,
+		ID:            ticket.ID,
+		EventID:       ticket.EventID,
+		UserID:        ticket.UserID,
+		ClientOrderID: ticket.ClientOrderID,
+		Status:        status,
+		CreatedAt:     ticket.CreatedAt,
+		UpdatedAt:     now,
 	}
 }
 
@@ -231,32 +215,7 @@ func (processor *Processor) decode(records []kafkago.Message) []decodedMessage {
 	return result
 }
 
-func (processor *Processor) loadEventSnapshots(ctx context.Context, eventIDs []int64) (map[int64]entity.Event, error) {
-	result, err := processor.cache.GetEvents(ctx, eventIDs)
-	if err != nil {
-		processor.logger.Warn("redis unavailable; loading events from postgres", "error", err)
-		result = make(map[int64]entity.Event, len(eventIDs))
-	}
-	missing := make([]int64, 0)
-	for _, eventID := range eventIDs {
-		if _, exists := result[eventID]; !exists {
-			missing = append(missing, eventID)
-		}
-	}
-	if len(missing) == 0 {
-		return result, nil
-	}
-	events, err := processor.repository.FindEventsByIDs(ctx, missing)
-	if err != nil {
-		return nil, err
-	}
-	for _, event := range events {
-		result[event.ID] = event
-	}
-	return result, nil
-}
-
-func (processor *Processor) updateCache(ctx context.Context, events []entity.Event) {
+func (processor *Processor) updateEventCache(ctx context.Context, events []entity.Event) {
 	if err := processor.cache.SetEvents(ctx, events); err != nil {
 		// PostgreSQL is the source of truth. A later batch or startup reconciliation repairs Redis.
 		processor.logger.Warn("cannot update events in redis", "error", err)
@@ -295,12 +254,6 @@ func sortedEventIDs(events map[int64]*entity.Event) []int64 {
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
 	return result
-}
-
-func decrementPending(event *entity.Event) {
-	if event.PendingTickets > 0 {
-		event.PendingTickets--
-	}
 }
 
 func canCancel(ticket *entity.Ticket, eventID int64, now time.Time, cancelAfter time.Duration) bool {

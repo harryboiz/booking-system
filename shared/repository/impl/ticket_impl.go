@@ -27,37 +27,18 @@ func NewTicketRepository(db *gorm.DB) repository.TicketRepository {
 	return &TicketRepositoryImpl{db: db}
 }
 
-func (impl *TicketRepositoryImpl) ReconcileEventStats(
+func (impl *TicketRepositoryImpl) FindEventsByMessageKeys(
 	ctx context.Context,
 	messageKeys []int,
+	batchMessageKey int,
 ) ([]entity.Event, error) {
 	var events []entity.Event
-	err := impl.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Exec(`
-			UPDATE events AS event
-			SET pending_tickets = (
-					SELECT COUNT(*) FROM tickets
-					WHERE tickets.event_id = event.id AND tickets.status = 'pending'
-				),
-				confirm_tickets = (
-					SELECT COUNT(*) FROM ticket_done
-					WHERE ticket_done.event_id = event.id AND ticket_done.status = 'confirm'
-				),
-				cancel_tickets = (
-					SELECT COUNT(*) FROM ticket_done
-					WHERE ticket_done.event_id = event.id AND ticket_done.status = 'cancelled'
-				),
-				updated_at = NOW()
-			WHERE MOD(event.id, 100) IN ?`, messageKeys).Error; err != nil {
-			return fmt.Errorf("reconcile event counters: %w", err)
-		}
-		if err := tx.Where("MOD(id, 100) IN ?", messageKeys).Order("id").Find(&events).Error; err != nil {
-			return fmt.Errorf("load reconciled events: %w", err)
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
+	if err := impl.db.WithContext(ctx).
+		Where("MOD(id, ?) IN ?", batchMessageKey, messageKeys).
+		Where("end_time > NOW() + INTERVAL '1 day'").
+		Order("id").
+		Find(&events).Error; err != nil {
+		return nil, fmt.Errorf("load events by message keys: %w", err)
 	}
 	return events, nil
 }

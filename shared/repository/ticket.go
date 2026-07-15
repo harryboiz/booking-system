@@ -10,7 +10,7 @@ import (
 
 // TicketRepository contains persistence operations for tickets and their event stats.
 type TicketRepository interface {
-	ReconcileEventStats(context.Context, []int) ([]entity.Event, error)
+	FindEventsByMessageKeys(context.Context, []int, int) ([]entity.Event, error)
 	FindEventsByIDs(context.Context, []int64) ([]entity.Event, error)
 	FindPendingTicketsByIDs(context.Context, []uuid.UUID) ([]entity.Ticket, error)
 	FindDoneTicketsByIDs(context.Context, []uuid.UUID) ([]entity.TicketDone, error)
