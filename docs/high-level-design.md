@@ -96,8 +96,8 @@ pending snapshots, and terminal ticket visibility become current after the ticke
 update consumer processes the message.
 
 The API performs fast availability and per-user-limit checks against Redis, while
-the consumer repeats the per-user-limit check against transactional state. The
-consumer is therefore the authoritative enforcement point for persisted tickets.
+the consumer repeats both checks against transactional state. The consumer is
+therefore the authoritative enforcement point for persisted tickets.
 
 ## Deployment boundaries
 

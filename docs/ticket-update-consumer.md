@@ -44,7 +44,7 @@ logged and skipped.
 
 | Command | Preconditions | Database effect |
 | --- | --- | --- |
-| `pending` | Ticket ID is new and the user is below the event limit | Insert into `tickets`; increment event pending count and `user_ticket.ticket_count` |
+| `pending` | Ticket ID is new, event capacity remains, and the user is below the event limit | Insert into `tickets`; increment event pending count and `user_ticket.ticket_count` |
 | `confirm` | Ticket exists in `tickets` as pending and is not already terminal | Move it to `ticket_done` with `confirm`; decrement pending count and increment confirm count |
 | `cancel` | Ticket is pending, belongs to the event, and is older than `cancel_after` | Move it to `ticket_done` with `cancelled`; decrement pending and user counts, increment cancel count |
 

@@ -179,6 +179,9 @@ func (processor *UpdateTicket) Process(ctx context.Context, records []kafkago.Me
 			if _, exists := doneByID[message.ticket.ID]; exists {
 				continue
 			}
+			if event.PendingTickets+event.ConfirmTickets >= int64(event.TotalTickets) {
+				continue
+			}
 			key := userTicketKey{eventID: message.ticket.EventID, userID: message.ticket.UserID}
 			userTicket := userTicketByKey[key]
 			if userTicket == nil {

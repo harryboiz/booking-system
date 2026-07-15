@@ -56,7 +56,7 @@ func TestCanCancelPendingTicketOnlyAfterTimeout(t *testing.T) {
 func TestProcessCreatesPendingTicketAndUpdatesEventStats(t *testing.T) {
 	ticketID := uuid.New()
 	createdAt := time.Now().UTC().Add(-time.Minute)
-	repository := newProcessorRepository([]entity.Event{{ID: 101}})
+	repository := newProcessorRepository([]entity.Event{{ID: 101, TotalTickets: 1}})
 	cache := &reconcileCache{}
 	processor := NewUpdateTicket(repository, repository, cache, cache, cache, 20*time.Minute, nil)
 	message := sharedkafka.UpdatedTicket{
@@ -93,7 +93,7 @@ func TestProcessCreatesPendingTicketAndUpdatesEventStats(t *testing.T) {
 }
 
 func TestProcessEnforcesMaxTicketPerUserWithinBatch(t *testing.T) {
-	repository := newProcessorRepository([]entity.Event{{ID: 101, MaxTicketPerUser: 2}})
+	repository := newProcessorRepository([]entity.Event{{ID: 101, TotalTickets: 10, MaxTicketPerUser: 2}})
 	repository.userTickets = []entity.UserTicket{{EventID: 101, UserID: 10, TicketCount: 1}}
 	cache := &reconcileCache{}
 	processor := NewUpdateTicket(repository, repository, cache, cache, cache, 20*time.Minute, nil)
@@ -122,8 +122,66 @@ func TestProcessEnforcesMaxTicketPerUserWithinBatch(t *testing.T) {
 	}
 }
 
+func TestProcessRejectsPendingTicketWhenEventCapacityIsReached(t *testing.T) {
+	repository := newProcessorRepository([]entity.Event{{
+		ID: 101, TotalTickets: 2, PendingTickets: 1, ConfirmTickets: 1,
+	}})
+	cache := &reconcileCache{}
+	processor := NewUpdateTicket(repository, repository, cache, cache, cache, 20*time.Minute, nil)
+	message := sharedkafka.UpdatedTicket{
+		ID: uuid.New(), EventID: 101, UserID: 10, ClientOrderID: "sold-out-order", Status: statusPending,
+	}
+
+	if err := processor.Process(context.Background(), []kafkago.Message{
+		ticketRecord(t, message, time.Now().UTC()),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(repository.inserted) != 0 {
+		t.Fatalf("inserted tickets = %+v", repository.inserted)
+	}
+	if len(repository.updatedEvents) != 0 {
+		t.Fatalf("updated events = %+v", repository.updatedEvents)
+	}
+	if len(repository.updatedUserTickets) != 0 {
+		t.Fatalf("updated user tickets = %+v", repository.updatedUserTickets)
+	}
+}
+
+func TestProcessEnforcesEventCapacityWithinBatch(t *testing.T) {
+	repository := newProcessorRepository([]entity.Event{{
+		ID: 101, TotalTickets: 2, PendingTickets: 1,
+	}})
+	cache := &reconcileCache{}
+	processor := NewUpdateTicket(repository, repository, cache, cache, cache, 20*time.Minute, nil)
+	first := sharedkafka.UpdatedTicket{
+		ID: uuid.New(), EventID: 101, UserID: 10, ClientOrderID: "last-ticket", Status: statusPending,
+	}
+	second := sharedkafka.UpdatedTicket{
+		ID: uuid.New(), EventID: 101, UserID: 11, ClientOrderID: "over-capacity", Status: statusPending,
+	}
+
+	if err := processor.Process(context.Background(), []kafkago.Message{
+		ticketRecord(t, first, time.Now().UTC()),
+		ticketRecord(t, second, time.Now().UTC()),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(repository.inserted) != 1 || repository.inserted[0].ID != first.ID {
+		t.Fatalf("inserted tickets = %+v", repository.inserted)
+	}
+	if len(repository.updatedEvents) != 1 || repository.updatedEvents[0].PendingTickets != 2 {
+		t.Fatalf("updated events = %+v", repository.updatedEvents)
+	}
+	if len(repository.updatedUserTickets) != 1 || repository.updatedUserTickets[0].UserID != first.UserID {
+		t.Fatalf("updated user tickets = %+v", repository.updatedUserTickets)
+	}
+}
+
 func TestProcessLoadsRequiredStateInParallel(t *testing.T) {
-	base := newProcessorRepository([]entity.Event{{ID: 101, MaxTicketPerUser: 1}})
+	base := newProcessorRepository([]entity.Event{{ID: 101, TotalTickets: 1, MaxTicketPerUser: 1}})
 	repository := &parallelQueryRepository{
 		processorRepository: base,
 		started:             make(chan string, 4),
