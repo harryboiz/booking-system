@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"strconv"
 	"testing"
 	"time"
 
@@ -52,6 +53,142 @@ func TestCanCancelPendingTicketOnlyAfterTimeout(t *testing.T) {
 	}
 }
 
+func TestProcessCreatesPendingTicketAndUpdatesEventStats(t *testing.T) {
+	ticketID := uuid.New()
+	createdAt := time.Now().UTC().Add(-time.Minute)
+	repository := newProcessorRepository([]entity.Event{{ID: 101}})
+	cache := &reconcileCache{}
+	processor := NewUpdateTicket(repository, repository, cache, cache, 20*time.Minute, nil)
+	message := sharedkafka.UpdatedTicket{
+		ID: ticketID, EventID: 101, UserID: 10, ClientOrderID: "order-1", Status: statusPending,
+	}
+
+	if err := processor.Process(context.Background(), []kafkago.Message{
+		ticketRecord(t, message, createdAt),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(repository.inserted) != 1 {
+		t.Fatalf("inserted tickets = %+v", repository.inserted)
+	}
+	inserted := repository.inserted[0]
+	if inserted.ID != ticketID || inserted.EventID != 101 || inserted.UserID != 10 ||
+		inserted.ClientOrderID != "order-1" || inserted.Status != statusPending ||
+		!inserted.CreatedAt.Equal(createdAt) || inserted.UpdatedAt.IsZero() {
+		t.Fatalf("inserted ticket = %+v", inserted)
+	}
+	if len(repository.deleted) != 0 || len(repository.completed) != 0 {
+		t.Fatalf("deleted = %+v, completed = %+v", repository.deleted, repository.completed)
+	}
+	if len(repository.updatedEvents) != 1 || repository.updatedEvents[0].PendingTickets != 1 {
+		t.Fatalf("updated events = %+v", repository.updatedEvents)
+	}
+	if len(cache.pending) != 1 || cache.pending[0].ID != ticketID || len(cache.done) != 0 {
+		t.Fatalf("cached pending = %+v, done = %+v", cache.pending, cache.done)
+	}
+}
+
+func TestProcessConfirmIsIdempotentForDuplicateMessages(t *testing.T) {
+	ticketID := uuid.New()
+	createdAt := time.Now().UTC().Add(-5 * time.Minute)
+	active := entity.Ticket{
+		ID: ticketID, EventID: 202, UserID: 10, ClientOrderID: "original-order",
+		Status: statusPending, CreatedAt: createdAt,
+	}
+	repository := newProcessorRepository([]entity.Event{{ID: 202, PendingTickets: 1}})
+	repository.pending = []entity.Ticket{active}
+	cache := &reconcileCache{}
+	processor := NewUpdateTicket(repository, repository, cache, cache, 20*time.Minute, nil)
+	message := sharedkafka.UpdatedTicket{
+		ID: ticketID, EventID: 202, UserID: 99, ClientOrderID: "ignored-message-order", Status: statusConfirm,
+	}
+	record := ticketRecord(t, message, time.Now().UTC())
+
+	if err := processor.Process(context.Background(), []kafkago.Message{record, record}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(repository.deleted) != 1 || repository.deleted[0].ID != ticketID {
+		t.Fatalf("deleted tickets = %+v", repository.deleted)
+	}
+	if len(repository.completed) != 1 {
+		t.Fatalf("completed tickets = %+v", repository.completed)
+	}
+	completed := repository.completed[0]
+	if completed.ID != ticketID || completed.Status != statusConfirm || completed.UserID != active.UserID ||
+		completed.ClientOrderID != active.ClientOrderID || !completed.CreatedAt.Equal(createdAt) {
+		t.Fatalf("completed ticket = %+v", completed)
+	}
+	if len(repository.updatedEvents) != 1 || repository.updatedEvents[0].PendingTickets != 0 ||
+		repository.updatedEvents[0].ConfirmTickets != 1 {
+		t.Fatalf("updated events = %+v", repository.updatedEvents)
+	}
+	if len(cache.pending) != 0 || len(cache.done) != 1 || cache.done[0].ID != ticketID {
+		t.Fatalf("cached pending = %+v, done = %+v", cache.pending, cache.done)
+	}
+}
+
+func TestProcessCancelOnlyExpiresOldPendingTicket(t *testing.T) {
+	now := time.Now().UTC()
+	oldID := uuid.New()
+	youngID := uuid.New()
+	repository := newProcessorRepository([]entity.Event{{ID: 303, PendingTickets: 2}})
+	repository.pending = []entity.Ticket{
+		{ID: oldID, EventID: 303, UserID: 10, ClientOrderID: "old", Status: statusPending, CreatedAt: now.Add(-21 * time.Minute)},
+		{ID: youngID, EventID: 303, UserID: 11, ClientOrderID: "young", Status: statusPending, CreatedAt: now.Add(-19 * time.Minute)},
+	}
+	cache := &reconcileCache{}
+	processor := NewUpdateTicket(repository, repository, cache, cache, 20*time.Minute, nil)
+	records := []kafkago.Message{
+		ticketRecord(t, sharedkafka.UpdatedTicket{
+			ID: oldID, EventID: 303, UserID: 10, ClientOrderID: "old", Status: statusCancel,
+		}, now),
+		ticketRecord(t, sharedkafka.UpdatedTicket{
+			ID: youngID, EventID: 303, UserID: 11, ClientOrderID: "young", Status: statusCancel,
+		}, now),
+	}
+
+	if err := processor.Process(context.Background(), records); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(repository.deleted) != 1 || repository.deleted[0].ID != oldID {
+		t.Fatalf("deleted tickets = %+v", repository.deleted)
+	}
+	if len(repository.completed) != 1 || repository.completed[0].ID != oldID ||
+		repository.completed[0].Status != statusCancelled {
+		t.Fatalf("completed tickets = %+v", repository.completed)
+	}
+	if len(repository.updatedEvents) != 1 || repository.updatedEvents[0].PendingTickets != 1 ||
+		repository.updatedEvents[0].CancelTickets != 1 {
+		t.Fatalf("updated events = %+v", repository.updatedEvents)
+	}
+	if len(cache.pending) != 1 || cache.pending[0].ID != youngID ||
+		len(cache.done) != 1 || cache.done[0].ID != oldID {
+		t.Fatalf("cached pending = %+v, done = %+v", cache.pending, cache.done)
+	}
+}
+
+func ticketRecord(
+	t *testing.T,
+	ticket sharedkafka.UpdatedTicket,
+	createdAt time.Time,
+) kafkago.Message {
+	t.Helper()
+	payload, err := json.Marshal(ticket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := sharedkafka.MessageKey(ticket.EventID)
+	return kafkago.Message{
+		Key:       []byte(strconv.FormatInt(key, 10)),
+		Partition: int(key),
+		Value:     payload,
+		Time:      createdAt,
+	}
+}
+
 func TestReconcileCachesTicketsForWorkerEvents(t *testing.T) {
 	pendingID := uuid.New()
 	doneID := uuid.New()
@@ -89,6 +226,53 @@ type reconcileRepository struct {
 	done            []entity.TicketDone
 	pendingEventIDs []int64
 	doneEventIDs    []int64
+}
+
+type processorRepository struct {
+	*reconcileRepository
+	inserted      []entity.Ticket
+	deleted       []entity.Ticket
+	completed     []entity.TicketDone
+	updatedEvents []entity.Event
+}
+
+func newProcessorRepository(events []entity.Event) *processorRepository {
+	return &processorRepository{reconcileRepository: &reconcileRepository{events: events}}
+}
+
+func (repository *processorRepository) FindEventsByIDs(
+	context.Context,
+	[]int64,
+) ([]entity.Event, error) {
+	return repository.events, nil
+}
+
+func (repository *processorRepository) FindPendingTicketsByIDs(
+	context.Context,
+	[]uuid.UUID,
+) ([]entity.Ticket, error) {
+	return repository.pending, nil
+}
+
+func (repository *processorRepository) FindDoneTicketsByIDs(
+	context.Context,
+	[]uuid.UUID,
+) ([]entity.TicketDone, error) {
+	return repository.done, nil
+}
+
+func (repository *processorRepository) PersistTicketChanges(
+	_ context.Context,
+	inserted []entity.Ticket,
+	deleted []entity.Ticket,
+	completed []entity.TicketDone,
+	updatedEvents []entity.Event,
+) error {
+	repository.inserted = append([]entity.Ticket(nil), inserted...)
+	repository.deleted = append([]entity.Ticket(nil), deleted...)
+	repository.completed = append([]entity.TicketDone(nil), completed...)
+	repository.updatedEvents = append([]entity.Event(nil), updatedEvents...)
+	return nil
 }
 
 func (repository *reconcileRepository) GetDoneTicketByID(

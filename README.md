@@ -194,18 +194,41 @@ curl -i -X POST http://localhost:8080/tickets/payment \
   }'
 ```
 
-API chỉ tạo PayPal order khi ticket tồn tại, thuộc user và còn `pending`. Response:
+API chỉ tạo PayPal order khi ticket tồn tại, thuộc user và còn `pending`. Handler ánh
+xạ ticket sang PayPal Orders v2 request với `intent: CAPTURE`, một `purchase_unit`,
+amount lấy từ `event.ticket_price`, currency `USD`, và dùng `ticket_id` làm header
+`PayPal-Request-Id`. Response đầu tiên trả `201 Created` theo format PayPal:
 
 ```json
 {
-  "paypal_order_id": "0f676fe2-8fb3-59f8-a40c-d1ac72ca51f5",
-  "payment_url": "https://paypal.local/checkoutnow?token=0f676fe2-8fb3-59f8-a40c-d1ac72ca51f5"
+  "id": "0F676FE28FB359F8A",
+  "status": "CREATED",
+  "create_time": "2026-07-15T10:00:00Z",
+  "links": [
+    {
+      "href": "https://api-m.sandbox.paypal.com/v2/checkout/orders/0F676FE28FB359F8A",
+      "rel": "self",
+      "method": "GET"
+    },
+    {
+      "href": "https://www.sandbox.paypal.com/checkoutnow?token=0F676FE28FB359F8A",
+      "rel": "approve",
+      "method": "GET"
+    },
+    {
+      "href": "https://api-m.sandbox.paypal.com/v2/checkout/orders/0F676FE28FB359F8A/capture",
+      "rel": "capture",
+      "method": "POST"
+    }
+  ]
 }
 ```
 
-PayPal simulator dùng `ticket_id` làm idempotency key và khóa thao tác tạo order.
-Các request retry hoặc chạy đồng thời cho cùng một pending ticket luôn nhận cùng
-`paypal_order_id` và `payment_url`; không tạo order thứ hai.
+Client redirect người mua tới URL trong link `rel: approve`. PayPal simulator khóa
+thao tác theo `PayPal-Request-Id`; retry hoặc request đồng thời cho cùng ticket nhận
+cùng order. Lần retry trả `200 OK`, giống idempotent response của PayPal. API kiểm tra
+`create_time` của order `CREATED`; order đã đủ 3 giờ trả `409 Conflict` với
+`{"error":"payment order expired"}` và không tạo thêm order cho pending ticket đó.
 
 ### Confirm ticket
 
@@ -220,8 +243,10 @@ curl -i -X POST http://localhost:8080/tickets/confirm \
 
 API đọc snapshot tại `tickets:{ticket_id}`. Ticket không tồn tại trả `404`; ticket
 không thuộc user trả `403`; ticket không còn `pending` trả `409`. Ticket hợp lệ được
-capture PayPal order đã tạo bởi `/tickets/payment`, sau đó publish lên Kafka với status
-`confirm` và API trả `202 Accepted`. Nếu chưa tạo payment order, API trả `409`.
+capture PayPal order đã tạo bởi `/tickets/payment`. Simulator trả Orders v2 response
+với order `COMPLETED` và capture nằm trong `purchase_units[].payments.captures[]`;
+sau đó API publish Kafka status `confirm` và trả `202 Accepted`. Nếu chưa tạo payment
+order, API trả `409`.
 
 ## Ticket worker
 

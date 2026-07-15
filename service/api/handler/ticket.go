@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -46,8 +48,8 @@ type TicketPublisher interface {
 }
 
 type PaymentProcessor interface {
-	CreateOrder(ctx context.Context, ticketID uuid.UUID, userID int64) (paypal.Order, error)
-	Capture(ctx context.Context, ticketID uuid.UUID, userID int64) (paypal.Payment, error)
+	CreateOrder(ctx context.Context, request paypal.CreateOrderRequest) (paypal.CreateOrderResponse, error)
+	Capture(ctx context.Context, ticketID uuid.UUID, userID int64) (paypal.CaptureOrderResponse, error)
 }
 
 func NewTicketHandler(
@@ -231,16 +233,38 @@ func (handler *TicketHandler) CreateTicketPayment(w http.ResponseWriter, r *http
 		apierror.Write(w, err)
 		return
 	}
-	order, err := handler.payment.CreateOrder(r.Context(), ticket.ID, ticket.UserID)
+	event, err := handler.eventCache.GetEventByID(r.Context(), ticket.EventID)
 	if err != nil {
 		apierror.Write(w, err)
 		return
 	}
-
-	apiresponse.Write(w, http.StatusOK, dto.TicketPayment{
-		PayPalOrderID: order.ID,
-		PaymentURL:    order.ApprovalURL,
+	response, err := handler.payment.CreateOrder(r.Context(), paypal.CreateOrderRequest{
+		PayPalRequestID: ticket.ID.String(),
+		Prefer:          paypal.PreferMinimal,
+		Body: paypal.OrderRequest{
+			Intent: paypal.IntentCapture,
+			PurchaseUnits: []paypal.PurchaseUnit{{
+				ReferenceID: ticket.ID.String(),
+				Description: event.Name,
+				CustomID:    strconv.FormatInt(ticket.UserID, 10),
+				InvoiceID:   ticket.ClientOrderID,
+				Amount: paypal.Money{
+					CurrencyCode: "USD",
+					Value:        strconv.FormatFloat(event.TicketPrice, 'f', 2, 64),
+				},
+			}},
+		},
 	})
+	if err != nil {
+		apierror.Write(w, err)
+		return
+	}
+	if response.Order.IsExpired(time.Now().UTC()) {
+		apierror.Write(w, apierror.New(http.StatusConflict, "payment order expired"))
+		return
+	}
+
+	apiresponse.Write(w, response.StatusCode, response.Order)
 }
 
 func (handler *TicketHandler) pendingTicketForUser(

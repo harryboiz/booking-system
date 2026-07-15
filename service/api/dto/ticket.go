@@ -70,11 +70,6 @@ type PendingTicket struct {
 	TicketID uuid.UUID `json:"ticket_id"`
 }
 
-type TicketPayment struct {
-	PayPalOrderID string `json:"paypal_order_id"`
-	PaymentURL    string `json:"payment_url"`
-}
-
 type Ticket struct {
 	ID            uuid.UUID `json:"id"`
 	EventID       int64     `json:"event_id"`

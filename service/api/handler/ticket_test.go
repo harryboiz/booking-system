@@ -166,36 +166,35 @@ type fakePublisher struct {
 }
 
 type fakePaymentProcessor struct {
-	payment          paypal.Payment
-	order            paypal.Order
-	err              error
-	createOrderErr   error
-	calls            int
-	createOrderCalls int
-	checkedTicketID  uuid.UUID
-	checkedUserID    int64
+	captureResponse      paypal.CaptureOrderResponse
+	createOrderResponse  paypal.CreateOrderResponse
+	err                  error
+	createOrderErr       error
+	calls                int
+	createOrderCalls     int
+	checkedCreateRequest paypal.CreateOrderRequest
+	checkedTicketID      uuid.UUID
+	checkedUserID        int64
 }
 
 func (processor *fakePaymentProcessor) CreateOrder(
 	_ context.Context,
-	ticketID uuid.UUID,
-	userID int64,
-) (paypal.Order, error) {
+	request paypal.CreateOrderRequest,
+) (paypal.CreateOrderResponse, error) {
 	processor.createOrderCalls++
-	processor.checkedTicketID = ticketID
-	processor.checkedUserID = userID
-	return processor.order, processor.createOrderErr
+	processor.checkedCreateRequest = request
+	return processor.createOrderResponse, processor.createOrderErr
 }
 
 func (processor *fakePaymentProcessor) Capture(
 	_ context.Context,
 	ticketID uuid.UUID,
 	userID int64,
-) (paypal.Payment, error) {
+) (paypal.CaptureOrderResponse, error) {
 	processor.calls++
 	processor.checkedTicketID = ticketID
 	processor.checkedUserID = userID
-	return processor.payment, processor.err
+	return processor.captureResponse, processor.err
 }
 
 func (publisher *fakePublisher) Publish(_ context.Context, message kafka.UpdatedTicket) error {
@@ -570,41 +569,88 @@ func TestCreatePendingTicketValidation(t *testing.T) {
 
 func TestCreateTicketPaymentReturnsPayPalURL(t *testing.T) {
 	ticketID := uuid.New()
-	inventory := &fakeInventory{ticket: entity.Ticket{
-		ID: ticketID, EventID: 20, UserID: 10, ClientOrderID: "order-123", Status: ticketStatusPending,
-	}}
-	payment := &fakePaymentProcessor{order: paypal.Order{
-		ID: "PAYPAL-ORDER-1", ApprovalURL: "https://paypal.local/checkoutnow?token=PAYPAL-ORDER-1",
+	inventory := &fakeInventory{
+		ticket: entity.Ticket{
+			ID: ticketID, EventID: 20, UserID: 10, ClientOrderID: "order-123", Status: ticketStatusPending,
+		},
+		event: entity.Event{ID: 20, Name: "Go Conference", TicketPrice: 49.5},
+	}
+	payment := &fakePaymentProcessor{createOrderResponse: paypal.CreateOrderResponse{
+		StatusCode: http.StatusCreated,
+		Order: paypal.Order{
+			ID: "PAYPALORDER1", Status: paypal.OrderStatusCreated, CreateTime: time.Now().UTC(),
+			Links: []paypal.Link{{
+				Href: "https://www.sandbox.paypal.com/checkoutnow?token=PAYPALORDER1",
+				Rel:  "approve", Method: http.MethodGet,
+			}},
+		},
 	}}
 	handler := NewTicketHandler(inventory, inventory, inventory, &fakePublisher{}, payment)
 
 	response := createTicketPaymentRequest(handler, 10, ticketID)
 
-	if response.Code != http.StatusOK {
+	if response.Code != http.StatusCreated {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
-	if payment.createOrderCalls != 1 || payment.checkedTicketID != ticketID || payment.checkedUserID != 10 {
-		t.Fatalf(
-			"create order = calls:%d ticket:%s user:%d",
-			payment.createOrderCalls,
-			payment.checkedTicketID,
-			payment.checkedUserID,
-		)
+	request := payment.checkedCreateRequest
+	if payment.createOrderCalls != 1 || request.PayPalRequestID != ticketID.String() ||
+		request.Prefer != paypal.PreferMinimal || request.Body.Intent != paypal.IntentCapture ||
+		len(request.Body.PurchaseUnits) != 1 {
+		t.Fatalf("create order = calls:%d request:%+v", payment.createOrderCalls, request)
 	}
-	var result dto.TicketPayment
+	unit := request.Body.PurchaseUnits[0]
+	if unit.ReferenceID != ticketID.String() || unit.CustomID != "10" ||
+		unit.InvoiceID != "order-123" || unit.Description != "Go Conference" ||
+		unit.Amount.CurrencyCode != "USD" || unit.Amount.Value != "49.50" {
+		t.Fatalf("purchase unit = %+v", unit)
+	}
+	var result paypal.Order
 	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
 		t.Fatal(err)
 	}
-	if result.PayPalOrderID != payment.order.ID || result.PaymentURL != payment.order.ApprovalURL {
-		t.Fatalf("payment = %+v", result)
+	approve, ok := result.Link("approve")
+	if result.ID != payment.createOrderResponse.Order.ID || !ok ||
+		approve.Href != payment.createOrderResponse.Order.Links[0].Href {
+		t.Fatalf("PayPal order = %+v", result)
+	}
+}
+
+func TestCreateTicketPaymentRejectsExpiredPayPalOrder(t *testing.T) {
+	ticketID := uuid.New()
+	inventory := &fakeInventory{
+		ticket: entity.Ticket{
+			ID: ticketID, EventID: 20, UserID: 10, ClientOrderID: "order-123", Status: ticketStatusPending,
+		},
+		event: entity.Event{ID: 20, Name: "Go Conference", TicketPrice: 49.5},
+	}
+	payment := &fakePaymentProcessor{createOrderResponse: paypal.CreateOrderResponse{
+		StatusCode: http.StatusOK,
+		Order: paypal.Order{
+			ID:         "EXPIREDORDER1",
+			Status:     paypal.OrderStatusCreated,
+			CreateTime: time.Now().UTC().Add(-paypal.OrderExpiresAfter),
+		},
+	}}
+	handler := NewTicketHandler(inventory, inventory, inventory, &fakePublisher{}, payment)
+
+	response := createTicketPaymentRequest(handler, 10, ticketID)
+
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if response.Body.String() != "{\"error\":\"payment order expired\"}\n" {
+		t.Fatalf("body = %s", response.Body.String())
 	}
 }
 
 func TestCreateTicketPaymentIsIdempotent(t *testing.T) {
 	ticketID := uuid.New()
-	inventory := &fakeInventory{ticket: entity.Ticket{
-		ID: ticketID, EventID: 20, UserID: 10, ClientOrderID: "order-123", Status: ticketStatusPending,
-	}}
+	inventory := &fakeInventory{
+		ticket: entity.Ticket{
+			ID: ticketID, EventID: 20, UserID: 10, ClientOrderID: "order-123", Status: ticketStatusPending,
+		},
+		event: entity.Event{ID: 20, Name: "Go Conference", TicketPrice: 49.5},
+	}
 	handler := NewTicketHandler(
 		inventory,
 		inventory,
@@ -615,18 +661,20 @@ func TestCreateTicketPaymentIsIdempotent(t *testing.T) {
 
 	firstResponse := createTicketPaymentRequest(handler, 10, ticketID)
 	secondResponse := createTicketPaymentRequest(handler, 10, ticketID)
-	if firstResponse.Code != http.StatusOK || secondResponse.Code != http.StatusOK {
+	if firstResponse.Code != http.StatusCreated || secondResponse.Code != http.StatusOK {
 		t.Fatalf("statuses = %d, %d", firstResponse.Code, secondResponse.Code)
 	}
-	var first, second dto.TicketPayment
+	var first, second paypal.Order
 	if err := json.NewDecoder(firstResponse.Body).Decode(&first); err != nil {
 		t.Fatal(err)
 	}
 	if err := json.NewDecoder(secondResponse.Body).Decode(&second); err != nil {
 		t.Fatal(err)
 	}
-	if first != second || first.PayPalOrderID == "" || first.PaymentURL == "" {
-		t.Fatalf("payments = first:%+v second:%+v", first, second)
+	firstApprove, firstOK := first.Link("approve")
+	secondApprove, secondOK := second.Link("approve")
+	if first.ID == "" || first.ID != second.ID || !firstOK || !secondOK || firstApprove != secondApprove {
+		t.Fatalf("orders = first:%+v second:%+v", first, second)
 	}
 }
 
