@@ -177,6 +177,29 @@ func TestEventCRUD(t *testing.T) {
 	}
 }
 
+func TestGetEventIncludesEstimateRevenue(t *testing.T) {
+	store := newFakeEventRepository()
+	store.events["1"] = entity.Event{
+		ID:             1,
+		TicketPrice:    19.99,
+		ConfirmTickets: 3,
+	}
+	store.nextID = 1
+
+	response := request(t, newRouter(store), http.MethodGet, "/events/1", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("get status = %d, body = %s", response.Code, response.Body.String())
+	}
+
+	var event dto.Event
+	if err := json.NewDecoder(response.Body).Decode(&event); err != nil {
+		t.Fatal(err)
+	}
+	if event.EstimateRevenue != 59.97 {
+		t.Fatalf("estimate revenue = %v, want 59.97", event.EstimateRevenue)
+	}
+}
+
 func TestCreateEventValidation(t *testing.T) {
 	router := newRouter(newFakeEventRepository())
 	tests := []struct {

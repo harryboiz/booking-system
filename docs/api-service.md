@@ -53,7 +53,9 @@ Create and update requests use this shape:
 
 Dates use RFC 3339. `end_time` cannot precede `start_date`, and
 `max_ticket_per_user` must be greater than zero. Ticket statistics in event
-responses are maintained by the ticket update consumer.
+responses are maintained by the ticket update consumer. Event responses also
+include `estimate_revenue`, calculated as `ticket_price * confirm_tickets` and
+rounded to two decimal places.
 
 Event mutations write PostgreSQL directly. The API does not update the event
 snapshot in Redis; the consumer's startup reconciliation or a later processed

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"math"
 	"net/http"
 	"strconv"
 
@@ -115,6 +116,7 @@ func eventDTO(event entity.Event) dto.Event {
 		EndTime:          event.EndTime,
 		TotalTickets:     event.TotalTickets,
 		TicketPrice:      event.TicketPrice,
+		EstimateRevenue:  math.Round(event.TicketPrice*float64(event.ConfirmTickets)*100) / 100,
 		PendingTickets:   event.PendingTickets,
 		ConfirmTickets:   event.ConfirmTickets,
 		CancelTickets:    event.CancelTickets,

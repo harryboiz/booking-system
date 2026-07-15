@@ -15,6 +15,7 @@ type Event struct {
 	EndTime          time.Time `json:"end_time"`
 	TotalTickets     int       `json:"total_tickets"`
 	TicketPrice      float64   `json:"ticket_price"`
+	EstimateRevenue  float64   `json:"estimate_revenue"`
 	PendingTickets   int64     `json:"pending_tickets"`
 	ConfirmTickets   int64     `json:"confirm_tickets"`
 	CancelTickets    int64     `json:"cancel_tickets"`
