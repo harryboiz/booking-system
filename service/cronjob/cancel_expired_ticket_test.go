@@ -10,6 +10,7 @@ import (
 
 	sharedkafka "ticket/shared/kafka"
 	"ticket/shared/model/entity"
+	"ticket/shared/repository"
 )
 
 func TestCancelExpiredTicketPollPublishesExpiredTicketsWithoutShardFilter(t *testing.T) {
@@ -18,7 +19,7 @@ func TestCancelExpiredTicketPollPublishesExpiredTicketsWithoutShardFilter(t *tes
 		{ID: uuid.New(), EventID: 101, UserID: 10, ClientOrderID: "order-1"},
 		{ID: uuid.New(), EventID: 202, UserID: 11, ClientOrderID: "order-2"},
 	}
-	repository := &expiredTicketRepositoryFake{tickets: tickets}
+	repository := &ticketRepositoryFake{tickets: tickets}
 	publisher := &publisherFake{}
 	job := NewCancelExpiredTicket(repository, publisher, 20*time.Minute, time.Minute, 100, nil)
 	job.now = func() time.Time { return now }
@@ -42,7 +43,7 @@ func TestCancelExpiredTicketPollPublishesExpiredTicketsWithoutShardFilter(t *tes
 }
 
 func TestCancelExpiredTicketPollContinuesAfterPublishError(t *testing.T) {
-	repository := &expiredTicketRepositoryFake{tickets: []entity.Ticket{
+	repository := &ticketRepositoryFake{tickets: []entity.Ticket{
 		{ID: uuid.New(), EventID: 1, UserID: 1, ClientOrderID: "order-1"},
 		{ID: uuid.New(), EventID: 2, UserID: 2, ClientOrderID: "order-2"},
 	}}
@@ -59,13 +60,14 @@ func TestCancelExpiredTicketPollContinuesAfterPublishError(t *testing.T) {
 	}
 }
 
-type expiredTicketRepositoryFake struct {
+type ticketRepositoryFake struct {
+	repository.TicketRepository
 	tickets []entity.Ticket
 	cutoff  time.Time
 	limit   int
 }
 
-func (repository *expiredTicketRepositoryFake) FindExpiredPendingTickets(
+func (repository *ticketRepositoryFake) FindExpiredPendingTickets(
 	_ context.Context,
 	cutoff time.Time,
 	limit int,

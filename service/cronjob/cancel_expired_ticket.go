@@ -19,7 +19,7 @@ type Publisher interface {
 // CancelExpiredTicket periodically publishes cancellation requests for every pending ticket
 // that has exceeded its confirmation window.
 type CancelExpiredTicket struct {
-	repository   repository.ExpiredTicketRepository
+	repository   repository.TicketRepository
 	publisher    Publisher
 	cancelAfter  time.Duration
 	pollInterval time.Duration
@@ -29,7 +29,7 @@ type CancelExpiredTicket struct {
 }
 
 func NewCancelExpiredTicket(
-	repository repository.ExpiredTicketRepository,
+	repository repository.TicketRepository,
 	publisher Publisher,
 	cancelAfter time.Duration,
 	pollInterval time.Duration,

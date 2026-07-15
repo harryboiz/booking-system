@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -131,6 +132,14 @@ func (inventory *fakeInventory) FindDoneTicketsByIDs(
 	context.Context,
 	[]uuid.UUID,
 ) ([]entity.TicketDone, error) {
+	return nil, nil
+}
+
+func (inventory *fakeInventory) FindExpiredPendingTickets(
+	context.Context,
+	time.Time,
+	int,
+) ([]entity.Ticket, error) {
 	return nil, nil
 }
 

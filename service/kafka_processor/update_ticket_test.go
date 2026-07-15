@@ -107,6 +107,14 @@ func (repository *reconcileRepository) GetDoneTicketByClientOrderID(
 	return entity.TicketDone{}, nil
 }
 
+func (repository *reconcileRepository) FindExpiredPendingTickets(
+	context.Context,
+	time.Time,
+	int,
+) ([]entity.Ticket, error) {
+	return nil, nil
+}
+
 func (repository *reconcileRepository) FindEventsByMessageKeys(
 	context.Context,
 	[]int,

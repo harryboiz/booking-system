@@ -24,13 +24,8 @@ type TicketRepositoryImpl struct {
 }
 
 var _ repository.TicketRepository = (*TicketRepositoryImpl)(nil)
-var _ repository.ExpiredTicketRepository = (*TicketRepositoryImpl)(nil)
 
 func NewTicketRepository(db *gorm.DB) repository.TicketRepository {
-	return &TicketRepositoryImpl{db: db}
-}
-
-func NewExpiredTicketRepository(db *gorm.DB) repository.ExpiredTicketRepository {
 	return &TicketRepositoryImpl{db: db}
 }
 

@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -19,6 +20,7 @@ type TicketRepository interface {
 	FindDoneTicketsByEventIDs(context.Context, []int64) ([]entity.TicketDone, error)
 	FindPendingTicketsByIDs(context.Context, []uuid.UUID) ([]entity.Ticket, error)
 	FindDoneTicketsByIDs(context.Context, []uuid.UUID) ([]entity.TicketDone, error)
+	FindExpiredPendingTickets(context.Context, time.Time, int) ([]entity.Ticket, error)
 	PersistTicketChanges(
 		context.Context,
 		[]entity.Ticket,

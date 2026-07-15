@@ -47,7 +47,7 @@ func main() {
 	}()
 
 	cancelExpiredTicket := cronjob.NewCancelExpiredTicket(
-		repositoryimpl.NewExpiredTicketRepository(db), publisher, cancelAfter,
+		repositoryimpl.NewTicketRepository(db), publisher, cancelAfter,
 		pollInterval, cfg.Settings.BatchSize, slog.Default(),
 	)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
