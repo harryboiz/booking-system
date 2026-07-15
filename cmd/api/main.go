@@ -37,10 +37,6 @@ func main() {
 		os.Exit(1)
 	}
 	defer sqlDB.Close()
-	if err := database.RunMigrations(ctx, db, "migrations"); err != nil {
-		slog.Error("cannot run database migrations", "error", err)
-		os.Exit(1)
-	}
 	inventory := redis.NewTicketInventory(
 		apiConfig.Redis.Address,
 		apiConfig.Redis.Password,

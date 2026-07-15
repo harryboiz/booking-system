@@ -60,17 +60,21 @@ services:
       kafka:
         condition: service_healthy
     command:
-      - /opt/kafka/bin/kafka-topics.sh
-      - --bootstrap-server
-      - kafka:29092
-      - --create
-      - --if-not-exists
-      - --topic
-      - ticket
-      - --partitions
-      - "3"
-      - --replication-factor
-      - "1"
+      - /bin/sh
+      - -ec
+      - |
+        /opt/kafka/bin/kafka-topics.sh \
+          --bootstrap-server kafka:29092 \
+          --create --if-not-exists \
+          --topic ticket --partitions 100 --replication-factor 1
+        CURRENT_PARTITIONS="$$(/opt/kafka/bin/kafka-topics.sh \
+          --bootstrap-server kafka:29092 --describe --topic ticket | \
+          awk -F 'PartitionCount: ' 'NR == 1 { split($$2, value, " "); print value[1] }')"
+        if [ "$$CURRENT_PARTITIONS" -lt 100 ]; then
+          /opt/kafka/bin/kafka-topics.sh \
+            --bootstrap-server kafka:29092 \
+            --alter --topic ticket --partitions 100
+        fi
 
 volumes:
   postgres_data:

@@ -98,7 +98,8 @@ func entityFromInput(input dto.EventInput) entity.Event {
 	return entity.Event{
 		Name:         input.Name,
 		Description:  input.Description,
-		DateTime:     input.DateTime,
+		StartDate:    input.StartDate,
+		EndTime:      input.EndTime,
 		TotalTickets: input.TotalTickets,
 		TicketPrice:  input.TicketPrice,
 	}
@@ -106,12 +107,16 @@ func entityFromInput(input dto.EventInput) entity.Event {
 
 func eventDTO(event entity.Event) dto.Event {
 	return dto.Event{
-		ID:           strconv.FormatInt(event.ID, 10),
-		Name:         event.Name,
-		Description:  event.Description,
-		DateTime:     event.DateTime,
-		TotalTickets: event.TotalTickets,
-		TicketPrice:  event.TicketPrice,
+		ID:             strconv.FormatInt(event.ID, 10),
+		Name:           event.Name,
+		Description:    event.Description,
+		StartDate:      event.StartDate,
+		EndTime:        event.EndTime,
+		TotalTickets:   event.TotalTickets,
+		TicketPrice:    event.TicketPrice,
+		PendingTickets: event.PendingTickets,
+		ConfirmTickets: event.ConfirmTickets,
+		CancelTickets:  event.CancelTickets,
 	}
 }
 

@@ -18,7 +18,8 @@ import (
 const validEvent = `{
   "name": "Go Conference",
   "description": "A conference for Go developers",
-  "date_time": "2026-09-10T09:00:00+07:00",
+  "start_date": "2026-09-10T09:00:00+07:00",
+  "end_time": "2026-09-10T18:00:00+07:00",
   "total_tickets": 200,
   "ticket_price": 49.5
 }`
@@ -121,7 +122,8 @@ func TestEventCRUD(t *testing.T) {
 	updatedBody := `{
       "name":"Updated Event",
       "description":"Updated",
-      "date_time":"2026-10-01T18:30:00Z",
+		  "start_date":"2026-10-01T18:30:00Z",
+		  "end_time":"2026-10-01T20:30:00Z",
       "total_tickets":50,
       "ticket_price":10
     }`
@@ -164,13 +166,14 @@ func TestCreateEventValidation(t *testing.T) {
 		name string
 		body string
 	}{
-		{"empty name", `{"name":"","date_time":"2026-09-10T09:00:00Z","total_tickets":1,"ticket_price":1}`},
+		{"empty name", `{"name":"","start_date":"2026-09-10T09:00:00Z","end_time":"2026-09-10T10:00:00Z","total_tickets":1,"ticket_price":1}`},
 		{"missing date", `{"name":"Event","total_tickets":1,"ticket_price":1}`},
-		{"negative tickets", `{"name":"Event","date_time":"2026-09-10T09:00:00Z","total_tickets":-1,"ticket_price":1}`},
-		{"negative price", `{"name":"Event","date_time":"2026-09-10T09:00:00Z","total_tickets":1,"ticket_price":-1}`},
-		{"tickets exceed database limit", `{"name":"Event","date_time":"2026-09-10T09:00:00Z","total_tickets":2147483648,"ticket_price":1}`},
-		{"price exceeds database limit", `{"name":"Event","date_time":"2026-09-10T09:00:00Z","total_tickets":1,"ticket_price":10000000000}`},
-		{"unknown field", `{"name":"Event","date_time":"2026-09-10T09:00:00Z","total_tickets":1,"ticket_price":1,"extra":true}`},
+		{"end before start", `{"name":"Event","start_date":"2026-09-10T09:00:00Z","end_time":"2026-09-10T08:00:00Z","total_tickets":1,"ticket_price":1}`},
+		{"negative tickets", `{"name":"Event","start_date":"2026-09-10T09:00:00Z","end_time":"2026-09-10T10:00:00Z","total_tickets":-1,"ticket_price":1}`},
+		{"negative price", `{"name":"Event","start_date":"2026-09-10T09:00:00Z","end_time":"2026-09-10T10:00:00Z","total_tickets":1,"ticket_price":-1}`},
+		{"tickets exceed database limit", `{"name":"Event","start_date":"2026-09-10T09:00:00Z","end_time":"2026-09-10T10:00:00Z","total_tickets":2147483648,"ticket_price":1}`},
+		{"price exceeds database limit", `{"name":"Event","start_date":"2026-09-10T09:00:00Z","end_time":"2026-09-10T10:00:00Z","total_tickets":1,"ticket_price":10000000000}`},
+		{"unknown field", `{"name":"Event","start_date":"2026-09-10T09:00:00Z","end_time":"2026-09-10T10:00:00Z","total_tickets":1,"ticket_price":1,"extra":true}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

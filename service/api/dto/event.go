@@ -8,18 +8,23 @@ import (
 )
 
 type Event struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	Description  string    `json:"description"`
-	DateTime     time.Time `json:"date_time"`
-	TotalTickets int       `json:"total_tickets"`
-	TicketPrice  float64   `json:"ticket_price"`
+	ID             string    `json:"id"`
+	Name           string    `json:"name"`
+	Description    string    `json:"description"`
+	StartDate      time.Time `json:"start_date"`
+	EndTime        time.Time `json:"end_time"`
+	TotalTickets   int       `json:"total_tickets"`
+	TicketPrice    float64   `json:"ticket_price"`
+	PendingTickets int64     `json:"pending_tickets"`
+	ConfirmTickets int64     `json:"confirm_tickets"`
+	CancelTickets  int64     `json:"cancel_tickets"`
 }
 
 type EventInput struct {
 	Name         string    `json:"name"`
 	Description  string    `json:"description"`
-	DateTime     time.Time `json:"date_time"`
+	StartDate    time.Time `json:"start_date"`
+	EndTime      time.Time `json:"end_time"`
 	TotalTickets int       `json:"total_tickets"`
 	TicketPrice  float64   `json:"ticket_price"`
 }
@@ -28,8 +33,14 @@ func (in EventInput) Validate() error {
 	if strings.TrimSpace(in.Name) == "" {
 		return errors.New("name is required")
 	}
-	if in.DateTime.IsZero() {
-		return errors.New("date_time is required and must use RFC3339 format")
+	if in.StartDate.IsZero() {
+		return errors.New("start_date is required and must use RFC3339 format")
+	}
+	if in.EndTime.IsZero() {
+		return errors.New("end_time is required and must use RFC3339 format")
+	}
+	if in.EndTime.Before(in.StartDate) {
+		return errors.New("end_time must be greater than or equal to start_date")
 	}
 	if in.TotalTickets < 0 {
 		return errors.New("total_tickets must be greater than or equal to 0")

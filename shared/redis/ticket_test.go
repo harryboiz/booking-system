@@ -3,6 +3,9 @@ package redis
 import "testing"
 
 func TestTicketKeys(t *testing.T) {
+	if got := EventKey(42); got != "events:42" {
+		t.Fatalf("event key = %q", got)
+	}
 	if got := ReservedTicketKey(42); got != "tickets:reserved:42" {
 		t.Fatalf("reserved ticket key = %q", got)
 	}

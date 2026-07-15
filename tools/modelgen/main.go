@@ -44,6 +44,9 @@ func main() {
 	generator.GenerateModel(
 		"events",
 		gen.FieldType("total_tickets", "int"),
+		gen.FieldType("pending_tickets", "int64"),
+		gen.FieldType("confirm_tickets", "int64"),
+		gen.FieldType("cancel_tickets", "int64"),
 		gen.FieldType("ticket_price", "float64"),
 	)
 	generator.GenerateModel(

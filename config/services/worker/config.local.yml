@@ -1,0 +1,11 @@
+worker:
+  group_id: ticket-worker-local
+  message_keys: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+  batch_size: 10000
+  batch_wait: 1s
+  cancel_after: 15m
+
+includes:
+  - ../../shared/postgres/config.local.yml
+  - ../../shared/redis/config.local.yml
+  - ../../shared/kafka/config.local.yml

@@ -12,14 +12,18 @@ const TableNameEvent = "events"
 
 // Event mapped from table <events>
 type Event struct {
-	ID           int64     `gorm:"column:id;type:bigint;primaryKey;autoIncrement:true" json:"id"`
-	Name         string    `gorm:"column:name;type:text;not null" json:"name"`
-	Description  string    `gorm:"column:description;type:text;not null" json:"description"`
-	DateTime     time.Time `gorm:"column:date_time;type:timestamp with time zone;not null;index:idx_events_date_time,priority:1" json:"date_time"`
-	TotalTickets int       `gorm:"column:total_tickets;type:integer;not null" json:"total_tickets"`
-	TicketPrice  float64   `gorm:"column:ticket_price;type:numeric(12,2);not null" json:"ticket_price"`
-	CreatedAt    time.Time `gorm:"column:created_at;type:timestamp with time zone;not null;default:now()" json:"created_at"`
-	UpdatedAt    time.Time `gorm:"column:updated_at;type:timestamp with time zone;not null;default:now()" json:"updated_at"`
+	ID             int64     `gorm:"column:id;type:bigint;primaryKey;autoIncrement:true" json:"id"`
+	Name           string    `gorm:"column:name;type:text;not null" json:"name"`
+	Description    string    `gorm:"column:description;type:text;not null" json:"description"`
+	StartDate      time.Time `gorm:"column:start_date;type:timestamp with time zone;not null;index:idx_events_start_date,priority:1" json:"start_date"`
+	TotalTickets   int       `gorm:"column:total_tickets;type:integer;not null" json:"total_tickets"`
+	TicketPrice    float64   `gorm:"column:ticket_price;type:numeric(12,2);not null" json:"ticket_price"`
+	CreatedAt      time.Time `gorm:"column:created_at;type:timestamp with time zone;not null;default:now()" json:"created_at"`
+	UpdatedAt      time.Time `gorm:"column:updated_at;type:timestamp with time zone;not null;default:now()" json:"updated_at"`
+	EndTime        time.Time `gorm:"column:end_time;type:timestamp with time zone;not null" json:"end_time"`
+	PendingTickets int64     `gorm:"column:pending_tickets;type:bigint;not null" json:"pending_tickets"`
+	ConfirmTickets int64     `gorm:"column:confirm_tickets;type:bigint;not null" json:"confirm_tickets"`
+	CancelTickets  int64     `gorm:"column:cancel_tickets;type:bigint;not null" json:"cancel_tickets"`
 }
 
 // TableName Event's table name

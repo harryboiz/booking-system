@@ -1,8 +1,8 @@
 # Ticket Event API
 
 REST API CRUD cho event và nhận yêu cầu giữ vé bất đồng bộ, viết bằng Go. Dữ liệu
-được lưu trong PostgreSQL, số vé còn lại được giữ atomic trên Redis và yêu cầu pending
-được publish vào Kafka.
+được lưu trong PostgreSQL, event được cache trên Redis và ticket được xử lý bất đồng
+bộ theo batch bởi Kafka worker.
 
 ## Chạy project
 
@@ -17,6 +17,13 @@ go run ./cmd/api
 Server chạy tại `http://localhost:8080`. Kiểm tra bằng `GET /health`. Migration Goose
 được embed và tự động chạy lệnh `up` khi ứng dụng khởi động.
 
+Chạy worker ở terminal khác:
+
+```bash
+export DATABASE_URL='postgres://ticket:ticket@localhost:5432/ticket?sslmode=disable'
+go run ./cmd/worker
+```
+
 ## Configuration
 
 `shared/config` load riêng từng file YAML:
@@ -25,19 +32,30 @@ Server chạy tại `http://localhost:8080`. Kiểm tra bằng `GET /health`. Mi
 - `config/shared/postgres/config.local.yml`: kết nối PostgreSQL.
 - `config/shared/redis/config.local.yml`: kết nối Redis.
 - `config/shared/kafka/config.local.yml`: Kafka brokers và topic `ticket`.
+- `config/services/worker/config.local.yml`: consumer group, message key/partition,
+  batch tối đa 10.000 message, thời gian gom batch và timeout cancel.
 
 Config API dùng `includes` để mượn cấu hình PostgreSQL, với đường dẫn được tính từ
 vị trí file API. Giá trị trong file API sẽ override giá trị được include nếu trùng key.
 Model generator vẫn có thể đọc trực tiếp config PostgreSQL. Biến môi trường
 `DATABASE_URL`, `REDIS_ADDR`, `REDIS_PASSWORD`, `REDIS_DB`, `KAFKA_BROKERS` và
 `KAFKA_TOPIC`, nếu được khai báo, sẽ override cấu hình tương ứng trong YAML.
+Worker còn nhận `WORKER_GROUP_ID`, `WORKER_MESSAGE_KEYS` (danh sách phân tách bằng
+dấu phẩy), `WORKER_BATCH_SIZE`, `WORKER_BATCH_WAIT` và `WORKER_CANCEL_AFTER`.
+
+Topic `ticket` có 100 partition. Kafka key là `event_id % 100` và được map trực tiếp
+vào partition cùng số. Mỗi worker chỉ mở reader cho các partition liệt kê trong
+`message_keys`; không cấu hình trùng một key cho nhiều worker đang chạy. Cấu hình
+local mẫu nhận key 0–9. Với topic 3 partition cũ, cần tạo lại Kafka volume hoặc tăng
+topic lên 100 partition trước khi chạy API/worker.
 
 ## Database migration
 
 Migration dùng [Goose](https://github.com/pressly/goose) và được quản lý version
 trong bảng `goose_db_version`.
 
-- `migrations/001_create_events.sql`: tạo bảng `events`.
+- `migrations/001_create_events.sql`: tạo bảng `events` với lịch bắt đầu/kết thúc
+  và các bộ đếm trạng thái ticket.
 - `migrations/002_create_users.sql`: tạo bảng `users` và unique index cho email.
 - `migrations/003_create_tickets.sql`: tạo bảng `tickets` với UUID do API sinh và
   cặp `(user_id, client_order_id)` unique; đồng thời tạo hypertable TimescaleDB
@@ -100,13 +118,15 @@ curl -i -X POST http://localhost:8080/events \
   -d '{
     "name": "Go Conference",
     "description": "A conference for Go developers",
-    "date_time": "2026-09-10T09:00:00+07:00",
+    "start_date": "2026-09-10T09:00:00+07:00",
+    "end_time": "2026-09-10T18:00:00+07:00",
     "total_tickets": 200,
     "ticket_price": 49.5
   }'
 ```
 
-`date_time` dùng định dạng RFC3339. `total_tickets` và `ticket_price` phải lớn hơn hoặc bằng 0.
+`start_date` và `end_time` dùng RFC3339; `end_time` không được trước `start_date`.
+Các cột stats chỉ đọc qua API và do worker quản lý.
 
 ### Tạo pending ticket
 
@@ -133,9 +153,29 @@ API dùng Redis `SETNX` để kiểm tra và giữ atomic key
 `tickets:client-order-id:{user_id}:{client_order_id}`, rồi từ chối nếu key đã tồn tại.
 Key được giữ lại để chặn retry, kể cả khi các bước tiếp theo thất bại. Sau đó API
 kiểm tra Redis còn vé nhưng không giảm tồn kho, sinh UUID rồi publish `UpdatedTicket`
-vào topic Kafka `ticket` với key là `event_id`. Kafka consumer chịu trách nhiệm giảm
+vào topic Kafka `ticket` với key là `event_id % 100`. Worker chịu trách nhiệm cập nhật
 tồn kho. API trả `202 Accepted` với `ticket_id`; nếu hết vé, API trả `409 Conflict`
 với `{"error":"tickets sold out"}`.
+
+## Ticket worker
+
+Khi khởi động, worker recompute stats trong PostgreSQL cho các event có
+`event_id % 100` thuộc `message_keys`, rồi đồng bộ snapshot `events:{event_id}` và số
+vé còn lại `tickets:reserved:{event_id}` sang Redis. Redis không phải source of truth;
+nếu Redis down hoặc cache miss, worker query PostgreSQL và tiếp tục xử lý.
+
+Worker gom tối đa 10.000 message, lấy ticket ID ở cả `tickets` và `ticket_done`, rồi
+duyệt message theo thứ tự nhận:
+
+- `pending`: insert vào `tickets` nếu ticket chưa tồn tại ở cả hai bảng.
+- `confirm`: chỉ chuyển ticket `pending` từ `tickets` sang `ticket_done` với status
+  `confirm`.
+- `cancel`: chỉ chuyển ticket `pending` đã cũ hơn 15 phút sang `ticket_done` với
+  status `cancelled`.
+
+Ticket và event stats của cả batch được ghi trong cùng một PostgreSQL transaction.
+Sau commit, worker refresh Redis rồi mới commit Kafka offset. Duplicate hoặc message
+không đúng state được bỏ qua, nên batch có thể retry theo cơ chế at-least-once.
 
 ## Test
 
@@ -169,6 +209,7 @@ Mỗi lần chạy tạo một prefix email riêng nên có thể seed nhiều l
 ```text
 cmd/
   api/                    # Binary entrypoint của API service
+  worker/                 # Binary entrypoint của Kafka worker
 service/
   api/
     routes.go             # Khai báo HTTP routes
@@ -177,12 +218,15 @@ service/
     handler/              # HTTP handlers tách riêng theo resource (API, event)
     validation/           # Decode và validate request
     dto/                  # Request/response DTO
+  worker/                 # Ticket message processor
 config/
   services/api/          # Cấu hình local của API
+  services/worker/       # Message keys, batch và timeout của worker
   shared/postgres/       # Cấu hình local của PostgreSQL
 shared/
   config/                 # Loader dùng chung cho các file YAML trong config/
   database/               # Kết nối PostgreSQL và migration runner dùng chung
+  kafka/                  # Kafka publisher và generic batch consumer
   model/entity/           # Entity do gorm.io/gen sinh từ bảng
   repository/             # Repository interface và lỗi dùng chung
     impl/                  # PostgreSQL repository implementation

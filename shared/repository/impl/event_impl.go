@@ -58,7 +58,8 @@ func (impl *EventRepositoryImpl) Update(ctx context.Context, id string, in entit
 	var record entity.Event
 	err = impl.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		result := tx.Model(&entity.Event{}).Where("id = ?", numericID).Updates(map[string]any{
-			"name": in.Name, "description": in.Description, "date_time": in.DateTime,
+			"name": in.Name, "description": in.Description, "start_date": in.StartDate,
+			"end_time": in.EndTime,
 			"total_tickets": in.TotalTickets, "ticket_price": in.TicketPrice,
 			"updated_at": time.Now(),
 		})

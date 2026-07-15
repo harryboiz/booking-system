@@ -28,7 +28,7 @@ func NewTicketPublisher(brokers []string, topic string) *TicketPublisher {
 	return &TicketPublisher{writer: &kafkago.Writer{
 		Addr:         kafkago.TCP(brokers...),
 		Topic:        topic,
-		Balancer:     &kafkago.Hash{},
+		Balancer:     MessageKeyBalancer{},
 		RequiredAcks: kafkago.RequireAll,
 		Async:        false,
 	}}
@@ -51,10 +51,43 @@ func updatedTicketMessage(ticket UpdatedTicket) (kafkago.Message, error) {
 		return kafkago.Message{}, fmt.Errorf("encode updated ticket message: %w", err)
 	}
 	return kafkago.Message{
-		Key:   []byte(strconv.FormatInt(ticket.EventID, 10)),
+		Key:   []byte(strconv.FormatInt(MessageKey(ticket.EventID), 10)),
 		Value: payload,
 		Time:  time.Now().UTC(),
 	}, nil
+}
+
+const MessageKeyCount int64 = 100
+
+// MessageKey keeps every event on one of the topic's 100 deterministic shards.
+func MessageKey(eventID int64) int64 {
+	key := eventID % MessageKeyCount
+	if key < 0 {
+		return key + MessageKeyCount
+	}
+	return key
+}
+
+// MessageKeyBalancer maps the numeric message key directly to a Kafka partition.
+// The ticket topic therefore needs at least MessageKeyCount partitions.
+type MessageKeyBalancer struct{}
+
+func (MessageKeyBalancer) Balance(message kafkago.Message, partitions ...int) int {
+	if len(partitions) == 0 {
+		return 0
+	}
+	key, err := strconv.Atoi(string(message.Key))
+	if err == nil {
+		for _, partition := range partitions {
+			if partition == key {
+				return partition
+			}
+		}
+		// Returning the absent partition makes publishing fail instead of silently
+		// routing the event to a shard that its configured worker will never read.
+		return key
+	}
+	return partitions[0]
 }
 
 func (publisher *TicketPublisher) Close() error {
