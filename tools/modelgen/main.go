@@ -44,6 +44,7 @@ func main() {
 	generator.GenerateModel(
 		"events",
 		gen.FieldType("total_tickets", "int"),
+		gen.FieldType("max_ticket_per_user", "int"),
 		gen.FieldType("pending_tickets", "int64"),
 		gen.FieldType("confirm_tickets", "int64"),
 		gen.FieldType("cancel_tickets", "int64"),
@@ -63,7 +64,11 @@ func main() {
 		// Keep the generated ticket ID aligned with the UUID created by the API.
 		gen.FieldType("id", "uuid.UUID"),
 	)
+	generator.GenerateModel(
+		"user_ticket",
+		gen.FieldType("ticket_count", "int64"),
+	)
 	generator.Execute()
 
-	fmt.Println("generated database models for events, users, tickets and ticket_done")
+	fmt.Println("generated database models for events, users, tickets, ticket_done and user_ticket")
 }

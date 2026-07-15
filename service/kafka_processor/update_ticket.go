@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	kafkago "github.com/segmentio/kafka-go"
+	"golang.org/x/sync/errgroup"
 
 	sharedkafka "ticket/shared/kafka"
 	"ticket/shared/model/entity"
@@ -32,11 +33,16 @@ type TicketCache interface {
 	SetTicket(context.Context, []entity.Ticket, []entity.TicketDone) error
 }
 
+type UserTicketCache interface {
+	SetUserTickets(context.Context, []entity.UserTicket) error
+}
+
 type UpdateTicket struct {
 	eventRepository  repository.EventRepository
 	ticketRepository repository.TicketRepository
 	eventCache       EventCache
 	ticketCache      TicketCache
+	userTicketCache  UserTicketCache
 	cancelAfter      time.Duration
 	logger           *slog.Logger
 }
@@ -51,6 +57,7 @@ func NewUpdateTicket(
 	ticketRepository repository.TicketRepository,
 	eventCache EventCache,
 	ticketCache TicketCache,
+	userTicketCache UserTicketCache,
 	cancelAfter time.Duration,
 	logger *slog.Logger,
 ) *UpdateTicket {
@@ -60,7 +67,8 @@ func NewUpdateTicket(
 	return &UpdateTicket{
 		eventRepository: eventRepository, ticketRepository: ticketRepository,
 		eventCache: eventCache, ticketCache: ticketCache,
-		cancelAfter: cancelAfter, logger: logger,
+		userTicketCache: userTicketCache,
+		cancelAfter:     cancelAfter, logger: logger,
 	}
 }
 
@@ -84,8 +92,13 @@ func (processor *UpdateTicket) Reconcile(ctx context.Context, messageKeys []int)
 	if err != nil {
 		return err
 	}
+	userTickets, err := processor.ticketRepository.FindUserTicketsByEventIDs(ctx, eventIDs)
+	if err != nil {
+		return err
+	}
 	processor.updateEventCache(ctx, events)
 	processor.updateTicketCache(ctx, pendingOrders, doneOrders)
+	processor.updateUserTicketCache(ctx, userTickets)
 	return nil
 }
 
@@ -96,23 +109,42 @@ func (processor *UpdateTicket) Process(ctx context.Context, records []kafkago.Me
 	}
 
 	eventIDs := uniqueEventIDs(decoded)
-	events, err := processor.eventRepository.FindEventsByIDs(ctx, eventIDs)
-	if err != nil {
+	ticketIDs := uniqueTicketIDs(decoded)
+
+	var (
+		events        []entity.Event
+		activeTickets []entity.Ticket
+		doneTickets   []entity.TicketDone
+		userTickets   []entity.UserTicket
+	)
+	queries, queryContext := errgroup.WithContext(ctx)
+	queries.Go(func() error {
+		var err error
+		events, err = processor.eventRepository.FindEventsByIDs(queryContext, eventIDs)
+		return err
+	})
+	queries.Go(func() error {
+		var err error
+		activeTickets, err = processor.ticketRepository.FindPendingTicketsByIDs(queryContext, ticketIDs)
+		return err
+	})
+	queries.Go(func() error {
+		var err error
+		doneTickets, err = processor.ticketRepository.FindDoneTicketsByIDs(queryContext, ticketIDs)
+		return err
+	})
+	queries.Go(func() error {
+		var err error
+		userTickets, err = processor.ticketRepository.FindUserTicketsByEventIDs(queryContext, eventIDs)
+		return err
+	})
+	if err := queries.Wait(); err != nil {
 		return err
 	}
+
 	eventByID := make(map[int64]*entity.Event, len(events))
 	for index := range events {
 		eventByID[events[index].ID] = &events[index]
-	}
-
-	ticketIDs := uniqueTicketIDs(decoded)
-	activeTickets, err := processor.ticketRepository.FindPendingTicketsByIDs(ctx, ticketIDs)
-	if err != nil {
-		return err
-	}
-	doneTickets, err := processor.ticketRepository.FindDoneTicketsByIDs(ctx, ticketIDs)
-	if err != nil {
-		return err
 	}
 	activeByID := make(map[uuid.UUID]*entity.Ticket, len(activeTickets))
 	for index := range activeTickets {
@@ -122,9 +154,15 @@ func (processor *UpdateTicket) Process(ctx context.Context, records []kafkago.Me
 	for index := range doneTickets {
 		doneByID[doneTickets[index].ID] = &doneTickets[index]
 	}
+	userTicketByKey := make(map[userTicketKey]*entity.UserTicket, len(userTickets))
+	for index := range userTickets {
+		key := userTicketKey{eventID: userTickets[index].EventID, userID: userTickets[index].UserID}
+		userTicketByKey[key] = &userTickets[index]
+	}
 
 	now := time.Now().UTC()
 	changed := make(map[int64]*entity.Event)
+	changedUserTickets := make(map[userTicketKey]*entity.UserTicket)
 	pendingTickets := make([]entity.Ticket, 0)
 	deletePendingTickets := make([]entity.Ticket, 0)
 	newDoneTickets := make([]entity.TicketDone, 0)
@@ -139,6 +177,19 @@ func (processor *UpdateTicket) Process(ctx context.Context, records []kafkago.Me
 				continue
 			}
 			if _, exists := doneByID[message.ticket.ID]; exists {
+				continue
+			}
+			key := userTicketKey{eventID: message.ticket.EventID, userID: message.ticket.UserID}
+			userTicket := userTicketByKey[key]
+			if userTicket == nil {
+				userTickets = append(userTickets, entity.UserTicket{
+					EventID: message.ticket.EventID, UserID: message.ticket.UserID,
+					CreatedAt: now, UpdatedAt: now,
+				})
+				userTicket = &userTickets[len(userTickets)-1]
+				userTicketByKey[key] = userTicket
+			}
+			if event.MaxTicketPerUser > 0 && userTicket.TicketCount >= int64(event.MaxTicketPerUser) {
 				continue
 			}
 			createdAt := message.record.Time.UTC()
@@ -158,6 +209,9 @@ func (processor *UpdateTicket) Process(ctx context.Context, records []kafkago.Me
 			activeByID[ticket.ID] = &pendingTickets[len(pendingTickets)-1]
 			event.PendingTickets++
 			changed[event.ID] = event
+			userTicket.TicketCount++
+			userTicket.UpdatedAt = now
+			changedUserTickets[key] = userTicket
 
 		case statusConfirm:
 			if _, exists := doneByID[message.ticket.ID]; exists {
@@ -192,6 +246,12 @@ func (processor *UpdateTicket) Process(ctx context.Context, records []kafkago.Me
 			event.PendingTickets--
 			event.CancelTickets++
 			changed[event.ID] = event
+			key := userTicketKey{eventID: active.EventID, userID: active.UserID}
+			if userTicket := userTicketByKey[key]; userTicket != nil && userTicket.TicketCount > 0 {
+				userTicket.TicketCount--
+				userTicket.UpdatedAt = now
+				changedUserTickets[key] = userTicket
+			}
 		}
 	}
 
@@ -201,14 +261,39 @@ func (processor *UpdateTicket) Process(ctx context.Context, records []kafkago.Me
 		event.UpdatedAt = now
 		updatedEventStats = append(updatedEventStats, *event)
 	}
+	updatedUserTickets := sortedUserTickets(changedUserTickets)
 	if err := processor.ticketRepository.PersistTicketChanges(
-		ctx, pendingTickets, deletePendingTickets, newDoneTickets, updatedEventStats,
+		ctx, pendingTickets, deletePendingTickets, newDoneTickets, updatedEventStats, updatedUserTickets,
 	); err != nil {
 		return err
 	}
 	processor.updateEventCache(ctx, updatedEventStats)
 	processor.updateTicketCache(ctx, pendingOrders(activeByID), completedOrders(doneByID))
+	processor.updateUserTicketCache(ctx, updatedUserTickets)
 	return nil
+}
+
+type userTicketKey struct {
+	eventID int64
+	userID  int64
+}
+
+func sortedUserTickets(userTickets map[userTicketKey]*entity.UserTicket) []entity.UserTicket {
+	keys := make([]userTicketKey, 0, len(userTickets))
+	for key := range userTickets {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].eventID == keys[j].eventID {
+			return keys[i].userID < keys[j].userID
+		}
+		return keys[i].eventID < keys[j].eventID
+	})
+	result := make([]entity.UserTicket, 0, len(keys))
+	for _, key := range keys {
+		result = append(result, *userTickets[key])
+	}
+	return result
 }
 
 func completedTicket(ticket *entity.Ticket, status string, now time.Time) entity.TicketDone {
@@ -262,6 +347,15 @@ func (processor *UpdateTicket) updateTicketCache(
 	if err := processor.ticketCache.SetTicket(ctx, pendingOrders, doneOrders); err != nil {
 		// PostgreSQL is the source of truth. A duplicate message can repair a stale cache later.
 		processor.logger.Warn("cannot update orders in redis", "error", err)
+	}
+}
+
+func (processor *UpdateTicket) updateUserTicketCache(
+	ctx context.Context,
+	userTickets []entity.UserTicket,
+) {
+	if err := processor.userTicketCache.SetUserTickets(ctx, userTickets); err != nil {
+		processor.logger.Warn("cannot update user ticket counters in redis", "error", err)
 	}
 }
 

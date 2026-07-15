@@ -26,11 +26,12 @@ const (
 )
 
 type TicketHandler struct {
-	ticketCache TicketCache
-	ticketStore repository.TicketRepository
-	eventCache  EventCache
-	publisher   TicketPublisher
-	payment     PaymentProcessor
+	ticketCache     TicketCache
+	ticketStore     repository.TicketRepository
+	eventCache      EventCache
+	userTicketCache UserTicketCache
+	publisher       TicketPublisher
+	payment         PaymentProcessor
 }
 
 type TicketCache interface {
@@ -41,6 +42,10 @@ type TicketCache interface {
 
 type EventCache interface {
 	GetEventByID(ctx context.Context, eventID int64) (entity.Event, error)
+}
+
+type UserTicketCache interface {
+	GetUserTicket(ctx context.Context, eventID, userID int64) (entity.UserTicket, error)
 }
 
 type TicketPublisher interface {
@@ -56,6 +61,7 @@ func NewTicketHandler(
 	ticketCache TicketCache,
 	ticketStore repository.TicketRepository,
 	eventCache EventCache,
+	userTicketCache UserTicketCache,
 	publisher TicketPublisher,
 	payments ...PaymentProcessor,
 ) *TicketHandler {
@@ -64,11 +70,12 @@ func NewTicketHandler(
 		payment = payments[0]
 	}
 	return &TicketHandler{
-		ticketCache: ticketCache,
-		ticketStore: ticketStore,
-		eventCache:  eventCache,
-		publisher:   publisher,
-		payment:     payment,
+		ticketCache:     ticketCache,
+		ticketStore:     ticketStore,
+		eventCache:      eventCache,
+		userTicketCache: userTicketCache,
+		publisher:       publisher,
+		payment:         payment,
 	}
 }
 
@@ -155,6 +162,17 @@ func (handler *TicketHandler) CreatePendingTicket(w http.ResponseWriter, r *http
 	remainingTickets := int64(event.TotalTickets) - event.PendingTickets - event.ConfirmTickets
 	if remainingTickets <= 0 {
 		apierror.Write(w, apierror.New(http.StatusConflict, "tickets sold out"))
+		return
+	}
+	userTicket, err := handler.userTicketCache.GetUserTicket(
+		r.Context(), input.EventID, input.UserID,
+	)
+	if err != nil {
+		apierror.Write(w, err)
+		return
+	}
+	if event.MaxTicketPerUser > 0 && userTicket.TicketCount >= int64(event.MaxTicketPerUser) {
+		apierror.Write(w, apierror.New(http.StatusConflict, "user ticket limit reached"))
 		return
 	}
 

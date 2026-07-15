@@ -21,6 +21,7 @@ const validEvent = `{
   "start_date": "2026-09-10T09:00:00+07:00",
   "end_time": "2026-09-10T18:00:00+07:00",
   "total_tickets": 200,
+	"max_ticket_per_user": 4,
   "ticket_price": 49.5
 }`
 
@@ -125,7 +126,7 @@ func TestEventCRUD(t *testing.T) {
 	if err := json.NewDecoder(created.Body).Decode(&event); err != nil {
 		t.Fatal(err)
 	}
-	if event.ID != "1" || event.Name != "Go Conference" {
+	if event.ID != "1" || event.Name != "Go Conference" || event.MaxTicketPerUser != 4 {
 		t.Fatalf("unexpected created event: %+v", event)
 	}
 
@@ -139,8 +140,9 @@ func TestEventCRUD(t *testing.T) {
       "description":"Updated",
 		  "start_date":"2026-10-01T18:30:00Z",
 		  "end_time":"2026-10-01T20:30:00Z",
-      "total_tickets":50,
-      "ticket_price":10
+		  "total_tickets":50,
+		  "max_ticket_per_user":2,
+		  "ticket_price":10
     }`
 	updated := request(t, router, http.MethodPut, "/events/1", updatedBody)
 	if updated.Code != http.StatusOK {
@@ -149,7 +151,7 @@ func TestEventCRUD(t *testing.T) {
 	if err := json.NewDecoder(updated.Body).Decode(&event); err != nil {
 		t.Fatal(err)
 	}
-	if event.ID != "1" || event.Name != "Updated Event" {
+	if event.ID != "1" || event.Name != "Updated Event" || event.MaxTicketPerUser != 2 {
 		t.Fatalf("unexpected updated event: %+v", event)
 	}
 
@@ -185,6 +187,8 @@ func TestCreateEventValidation(t *testing.T) {
 		{"missing date", `{"name":"Event","total_tickets":1,"ticket_price":1}`},
 		{"end before start", `{"name":"Event","start_date":"2026-09-10T09:00:00Z","end_time":"2026-09-10T08:00:00Z","total_tickets":1,"ticket_price":1}`},
 		{"negative tickets", `{"name":"Event","start_date":"2026-09-10T09:00:00Z","end_time":"2026-09-10T10:00:00Z","total_tickets":-1,"ticket_price":1}`},
+		{"missing user ticket limit", `{"name":"Event","start_date":"2026-09-10T09:00:00Z","end_time":"2026-09-10T10:00:00Z","total_tickets":1,"ticket_price":1}`},
+		{"invalid user ticket limit", `{"name":"Event","start_date":"2026-09-10T09:00:00Z","end_time":"2026-09-10T10:00:00Z","total_tickets":1,"max_ticket_per_user":0,"ticket_price":1}`},
 		{"negative price", `{"name":"Event","start_date":"2026-09-10T09:00:00Z","end_time":"2026-09-10T10:00:00Z","total_tickets":1,"ticket_price":-1}`},
 		{"tickets exceed database limit", `{"name":"Event","start_date":"2026-09-10T09:00:00Z","end_time":"2026-09-10T10:00:00Z","total_tickets":2147483648,"ticket_price":1}`},
 		{"price exceeds database limit", `{"name":"Event","start_date":"2026-09-10T09:00:00Z","end_time":"2026-09-10T10:00:00Z","total_tickets":1,"ticket_price":10000000000}`},

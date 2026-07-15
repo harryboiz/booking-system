@@ -51,6 +51,9 @@ type fakeInventory struct {
 	event                entity.Event
 	eventError           error
 	eventChecks          int
+	userTicket           entity.UserTicket
+	userTicketError      error
+	userTicketChecks     int
 }
 
 func (inventory *fakeInventory) GetOrderID(
@@ -122,6 +125,13 @@ func (inventory *fakeInventory) FindDoneTicketsByEventIDs(
 	return nil, nil
 }
 
+func (inventory *fakeInventory) FindUserTicketsByEventIDs(
+	context.Context,
+	[]int64,
+) ([]entity.UserTicket, error) {
+	return nil, nil
+}
+
 func (inventory *fakeInventory) FindPendingTicketsByIDs(
 	context.Context,
 	[]uuid.UUID,
@@ -150,8 +160,24 @@ func (inventory *fakeInventory) PersistTicketChanges(
 	[]entity.Ticket,
 	[]entity.TicketDone,
 	[]entity.Event,
+	[]entity.UserTicket,
 ) error {
 	return nil
+}
+
+func (inventory *fakeInventory) GetUserTicket(
+	_ context.Context,
+	eventID int64,
+	userID int64,
+) (entity.UserTicket, error) {
+	inventory.userTicketChecks++
+	if inventory.userTicket.EventID == 0 {
+		inventory.userTicket.EventID = eventID
+	}
+	if inventory.userTicket.UserID == 0 {
+		inventory.userTicket.UserID = userID
+	}
+	return inventory.userTicket, inventory.userTicketError
 }
 
 func (inventory *fakeInventory) GetEventByID(context.Context, int64) (entity.Event, error) {
@@ -249,7 +275,7 @@ func TestGetTicketByIDReturnsPendingTicketFromRedis(t *testing.T) {
 	inventory := &fakeInventory{ticket: entity.Ticket{
 		ID: ticketID, EventID: 20, UserID: 10, ClientOrderID: "order-123", Status: ticketStatusPending,
 	}}
-	handler := NewTicketHandler(inventory, inventory, inventory, &fakePublisher{})
+	handler := NewTicketHandler(inventory, inventory, inventory, inventory, &fakePublisher{})
 
 	response := getTicketRequest(handler, "user_id=10&ticket_id="+ticketID.String())
 
@@ -287,7 +313,7 @@ func TestGetTicketByClientOrderIDReturnsPendingTicketFromRedis(t *testing.T) {
 			ID: ticketID, EventID: 20, UserID: 10, ClientOrderID: "order-123", Status: ticketStatusPending,
 		},
 	}
-	handler := NewTicketHandler(inventory, inventory, inventory, &fakePublisher{})
+	handler := NewTicketHandler(inventory, inventory, inventory, inventory, &fakePublisher{})
 
 	response := getTicketRequest(handler, "user_id=10&client_order_id=%20order-123%20")
 
@@ -314,7 +340,7 @@ func TestGetTicketByIDFallsBackToDoneTicket(t *testing.T) {
 	inventory := &fakeInventory{doneTicket: entity.TicketDone{
 		ID: ticketID, EventID: 20, UserID: 10, ClientOrderID: "order-123", Status: ticketStatusConfirm,
 	}}
-	handler := NewTicketHandler(inventory, inventory, inventory, &fakePublisher{})
+	handler := NewTicketHandler(inventory, inventory, inventory, inventory, &fakePublisher{})
 
 	response := getTicketRequest(handler, "user_id=10&ticket_id="+ticketID.String())
 
@@ -345,7 +371,7 @@ func TestGetTicketByClientOrderIDFallsBackToDoneTicket(t *testing.T) {
 	inventory := &fakeInventory{doneTicket: entity.TicketDone{
 		ID: ticketID, EventID: 20, UserID: 10, ClientOrderID: "order-123", Status: ticketStatusConfirm,
 	}}
-	handler := NewTicketHandler(inventory, inventory, inventory, &fakePublisher{})
+	handler := NewTicketHandler(inventory, inventory, inventory, inventory, &fakePublisher{})
 
 	response := getTicketRequest(handler, "user_id=10&client_order_id=order-123")
 
@@ -369,7 +395,7 @@ func TestGetTicketByClientOrderIDFallsBackToDoneTicket(t *testing.T) {
 func TestGetTicketByIDReturnsNotFound(t *testing.T) {
 	ticketID := uuid.New()
 	inventory := &fakeInventory{getDoneTicketError: repository.ErrTicketNotFound}
-	handler := NewTicketHandler(inventory, inventory, inventory, &fakePublisher{})
+	handler := NewTicketHandler(inventory, inventory, inventory, inventory, &fakePublisher{})
 
 	response := getTicketRequest(handler, "user_id=10&ticket_id="+ticketID.String())
 
@@ -388,7 +414,7 @@ func TestGetTicketByIDValidation(t *testing.T) {
 		"user_id=10&ticket_id=not-a-uuid",
 		"user_id=10&client_order_id=order-123&extra=true",
 	}
-	handler := NewTicketHandler(&fakeInventory{}, &fakeInventory{}, &fakeInventory{}, &fakePublisher{})
+	handler := NewTicketHandler(&fakeInventory{}, &fakeInventory{}, &fakeInventory{}, &fakeInventory{}, &fakePublisher{})
 
 	for _, query := range tests {
 		response := getTicketRequest(handler, query)
@@ -401,7 +427,7 @@ func TestGetTicketByIDValidation(t *testing.T) {
 func TestCreatePendingTicketPublishesMessage(t *testing.T) {
 	inventory := &fakeInventory{event: entity.Event{ID: 20, TotalTickets: 1}}
 	publisher := &fakePublisher{}
-	response := pendingTicketRequest(NewTicketHandler(inventory, inventory, inventory, publisher), validPendingTicket)
+	response := pendingTicketRequest(NewTicketHandler(inventory, inventory, inventory, inventory, publisher), validPendingTicket)
 
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
@@ -446,7 +472,7 @@ func TestCreatePendingTicketReturnsExistingOrderID(t *testing.T) {
 	orderID := uuid.New()
 	inventory := &fakeInventory{orderID: orderID}
 	publisher := &fakePublisher{}
-	response := pendingTicketRequest(NewTicketHandler(inventory, inventory, inventory, publisher), validPendingTicket)
+	response := pendingTicketRequest(NewTicketHandler(inventory, inventory, inventory, inventory, publisher), validPendingTicket)
 
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
@@ -473,7 +499,7 @@ func TestCreatePendingTicketReturnsSoldOut(t *testing.T) {
 	inventory := &fakeInventory{event: entity.Event{ID: 20, TotalTickets: 100, PendingTickets: 80, ConfirmTickets: 20}}
 	publisher := &fakePublisher{}
 	response := pendingTicketRequest(
-		NewTicketHandler(inventory, inventory, inventory, publisher),
+		NewTicketHandler(inventory, inventory, inventory, inventory, publisher),
 		validPendingTicket,
 	)
 
@@ -485,10 +511,37 @@ func TestCreatePendingTicketReturnsSoldOut(t *testing.T) {
 	}
 }
 
+func TestCreatePendingTicketReturnsUserTicketLimitReached(t *testing.T) {
+	inventory := &fakeInventory{
+		event:      entity.Event{ID: 20, TotalTickets: 100, MaxTicketPerUser: 2},
+		userTicket: entity.UserTicket{EventID: 20, UserID: 10, TicketCount: 2},
+	}
+	publisher := &fakePublisher{}
+	response := pendingTicketRequest(
+		NewTicketHandler(inventory, inventory, inventory, inventory, publisher),
+		validPendingTicket,
+	)
+
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if response.Body.String() != "{\"error\":\"user ticket limit reached\"}\n" {
+		t.Fatalf("body = %s", response.Body.String())
+	}
+	if inventory.userTicketChecks != 1 || publisher.calls != 0 || inventory.setOrderIDCalls != 0 {
+		t.Fatalf(
+			"checks = %d, publish calls = %d, set order calls = %d",
+			inventory.userTicketChecks,
+			publisher.calls,
+			inventory.setOrderIDCalls,
+		)
+	}
+}
+
 func TestCreatePendingTicketReturnsErrorWhenPublishFails(t *testing.T) {
 	inventory := &fakeInventory{event: entity.Event{ID: 20, TotalTickets: 1}}
 	publisher := &fakePublisher{err: errors.New("kafka unavailable")}
-	response := pendingTicketRequest(NewTicketHandler(inventory, inventory, inventory, publisher), validPendingTicket)
+	response := pendingTicketRequest(NewTicketHandler(inventory, inventory, inventory, inventory, publisher), validPendingTicket)
 
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
@@ -507,7 +560,7 @@ func TestCreatePendingTicketReturnsErrorWhenSetOrderIDFails(t *testing.T) {
 		setOrderIDError: errors.New("redis unavailable"),
 	}
 	publisher := &fakePublisher{}
-	response := pendingTicketRequest(NewTicketHandler(inventory, inventory, inventory, publisher), validPendingTicket)
+	response := pendingTicketRequest(NewTicketHandler(inventory, inventory, inventory, inventory, publisher), validPendingTicket)
 
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
@@ -520,7 +573,7 @@ func TestCreatePendingTicketReturnsErrorWhenSetOrderIDFails(t *testing.T) {
 func TestCreatePendingTicketReturnsErrorWhenRedisCheckFails(t *testing.T) {
 	inventory := &fakeInventory{getOrderIDError: errors.New("redis unavailable")}
 	publisher := &fakePublisher{}
-	response := pendingTicketRequest(NewTicketHandler(inventory, inventory, inventory, publisher), validPendingTicket)
+	response := pendingTicketRequest(NewTicketHandler(inventory, inventory, inventory, inventory, publisher), validPendingTicket)
 
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
@@ -533,7 +586,7 @@ func TestCreatePendingTicketReturnsErrorWhenRedisCheckFails(t *testing.T) {
 func TestCreatePendingTicketReturnsErrorWhenEventCacheFails(t *testing.T) {
 	inventory := &fakeInventory{eventError: errors.New("redis unavailable")}
 	publisher := &fakePublisher{}
-	response := pendingTicketRequest(NewTicketHandler(inventory, inventory, inventory, publisher), validPendingTicket)
+	response := pendingTicketRequest(NewTicketHandler(inventory, inventory, inventory, inventory, publisher), validPendingTicket)
 
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
@@ -557,7 +610,7 @@ func TestCreatePendingTicketValidation(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			response := pendingTicketRequest(
-				NewTicketHandler(&fakeInventory{}, &fakeInventory{}, &fakeInventory{}, &fakePublisher{}),
+				NewTicketHandler(&fakeInventory{}, &fakeInventory{}, &fakeInventory{}, &fakeInventory{}, &fakePublisher{}),
 				test.body,
 			)
 			if response.Code != http.StatusBadRequest && response.Code != http.StatusUnprocessableEntity {
@@ -585,7 +638,7 @@ func TestCreateTicketPaymentReturnsPayPalURL(t *testing.T) {
 			}},
 		},
 	}}
-	handler := NewTicketHandler(inventory, inventory, inventory, &fakePublisher{}, payment)
+	handler := NewTicketHandler(inventory, inventory, inventory, inventory, &fakePublisher{}, payment)
 
 	response := createTicketPaymentRequest(handler, 10, ticketID)
 
@@ -631,7 +684,7 @@ func TestCreateTicketPaymentRejectsExpiredPayPalOrder(t *testing.T) {
 			CreateTime: time.Now().UTC().Add(-paypal.OrderExpiresAfter),
 		},
 	}}
-	handler := NewTicketHandler(inventory, inventory, inventory, &fakePublisher{}, payment)
+	handler := NewTicketHandler(inventory, inventory, inventory, inventory, &fakePublisher{}, payment)
 
 	response := createTicketPaymentRequest(handler, 10, ticketID)
 
@@ -652,6 +705,7 @@ func TestCreateTicketPaymentIsIdempotent(t *testing.T) {
 		event: entity.Event{ID: 20, Name: "Go Conference", TicketPrice: 49.5},
 	}
 	handler := NewTicketHandler(
+		inventory,
 		inventory,
 		inventory,
 		inventory,
@@ -684,7 +738,7 @@ func TestCreateTicketPaymentRejectsNonPendingTicket(t *testing.T) {
 		ID: ticketID, UserID: 10, Status: ticketStatusConfirm,
 	}}
 	payment := &fakePaymentProcessor{}
-	handler := NewTicketHandler(inventory, inventory, inventory, &fakePublisher{}, payment)
+	handler := NewTicketHandler(inventory, inventory, inventory, inventory, &fakePublisher{}, payment)
 
 	response := createTicketPaymentRequest(handler, 10, ticketID)
 
@@ -724,6 +778,7 @@ func TestCreateTicketPaymentRejectsMissingTicketAndAnotherUser(t *testing.T) {
 				test.inventory,
 				test.inventory,
 				test.inventory,
+				test.inventory,
 				&fakePublisher{},
 				payment,
 			)
@@ -746,7 +801,7 @@ func TestCreateTicketPaymentReturnsErrorWhenPayPalFails(t *testing.T) {
 		ID: ticketID, UserID: 10, Status: ticketStatusPending,
 	}}
 	payment := &fakePaymentProcessor{createOrderErr: errors.New("paypal unavailable")}
-	handler := NewTicketHandler(inventory, inventory, inventory, &fakePublisher{}, payment)
+	handler := NewTicketHandler(inventory, inventory, inventory, inventory, &fakePublisher{}, payment)
 
 	response := createTicketPaymentRequest(handler, 10, ticketID)
 
@@ -757,7 +812,7 @@ func TestCreateTicketPaymentReturnsErrorWhenPayPalFails(t *testing.T) {
 
 func TestCreateTicketPaymentValidation(t *testing.T) {
 	inventory := &fakeInventory{}
-	handler := NewTicketHandler(inventory, inventory, inventory, &fakePublisher{})
+	handler := NewTicketHandler(inventory, inventory, inventory, inventory, &fakePublisher{})
 
 	if got := createTicketPaymentRequest(handler, 0, uuid.New()); got.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("invalid user status = %d, body = %s", got.Code, got.Body.String())
@@ -775,7 +830,7 @@ func TestConfirmTicketPublishesConfirmMessage(t *testing.T) {
 	publisher := &fakePublisher{}
 	payment := &fakePaymentProcessor{}
 	response := confirmTicketRequest(
-		NewTicketHandler(inventory, inventory, inventory, publisher, payment),
+		NewTicketHandler(inventory, inventory, inventory, inventory, publisher, payment),
 		10,
 		ticketID,
 	)
@@ -813,7 +868,7 @@ func TestConfirmTicketReturnsNotFound(t *testing.T) {
 	ticketID := uuid.New()
 	inventory := &fakeInventory{}
 	publisher := &fakePublisher{}
-	response := confirmTicketRequest(NewTicketHandler(inventory, inventory, inventory, publisher), 10, ticketID)
+	response := confirmTicketRequest(NewTicketHandler(inventory, inventory, inventory, inventory, publisher), 10, ticketID)
 
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
@@ -829,7 +884,7 @@ func TestConfirmTicketReturnsForbiddenForAnotherUser(t *testing.T) {
 		ID: ticketID, EventID: 20, UserID: 11, ClientOrderID: "order-123", Status: ticketStatusPending,
 	}}
 	publisher := &fakePublisher{}
-	response := confirmTicketRequest(NewTicketHandler(inventory, inventory, inventory, publisher), 10, ticketID)
+	response := confirmTicketRequest(NewTicketHandler(inventory, inventory, inventory, inventory, publisher), 10, ticketID)
 
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
@@ -845,7 +900,7 @@ func TestConfirmTicketReturnsConflictWhenNotPending(t *testing.T) {
 		ID: ticketID, EventID: 20, UserID: 10, ClientOrderID: "order-123", Status: ticketStatusConfirm,
 	}}
 	publisher := &fakePublisher{}
-	response := confirmTicketRequest(NewTicketHandler(inventory, inventory, inventory, publisher), 10, ticketID)
+	response := confirmTicketRequest(NewTicketHandler(inventory, inventory, inventory, inventory, publisher), 10, ticketID)
 
 	if response.Code != http.StatusConflict {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
@@ -859,7 +914,7 @@ func TestConfirmTicketReturnsErrorWhenRedisFails(t *testing.T) {
 	ticketID := uuid.New()
 	inventory := &fakeInventory{getTicketError: errors.New("redis unavailable")}
 	publisher := &fakePublisher{}
-	response := confirmTicketRequest(NewTicketHandler(inventory, inventory, inventory, publisher), 10, ticketID)
+	response := confirmTicketRequest(NewTicketHandler(inventory, inventory, inventory, inventory, publisher), 10, ticketID)
 
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
@@ -876,7 +931,7 @@ func TestConfirmTicketReturnsErrorWhenPublishFails(t *testing.T) {
 	}}
 	publisher := &fakePublisher{err: errors.New("kafka unavailable")}
 	response := confirmTicketRequest(
-		NewTicketHandler(inventory, inventory, inventory, publisher, &fakePaymentProcessor{}),
+		NewTicketHandler(inventory, inventory, inventory, inventory, publisher, &fakePaymentProcessor{}),
 		10,
 		ticketID,
 	)
@@ -894,7 +949,7 @@ func TestConfirmTicketDoesNotPublishWhenPaymentFails(t *testing.T) {
 	publisher := &fakePublisher{}
 	payment := &fakePaymentProcessor{err: errors.New("paypal unavailable")}
 	response := confirmTicketRequest(
-		NewTicketHandler(inventory, inventory, inventory, publisher, payment),
+		NewTicketHandler(inventory, inventory, inventory, inventory, publisher, payment),
 		10,
 		ticketID,
 	)
@@ -917,7 +972,7 @@ func TestConfirmTicketRequiresPaymentOrder(t *testing.T) {
 	}}
 	publisher := &fakePublisher{}
 	response := confirmTicketRequest(
-		NewTicketHandler(inventory, inventory, inventory, publisher, paypal.NewSimulator()),
+		NewTicketHandler(inventory, inventory, inventory, inventory, publisher, paypal.NewSimulator()),
 		10,
 		ticketID,
 	)
@@ -932,7 +987,7 @@ func TestConfirmTicketRequiresPaymentOrder(t *testing.T) {
 
 func TestConfirmTicketValidation(t *testing.T) {
 	inventory := &fakeInventory{}
-	handler := NewTicketHandler(inventory, inventory, inventory, &fakePublisher{})
+	handler := NewTicketHandler(inventory, inventory, inventory, inventory, &fakePublisher{})
 
 	if got := confirmTicketRequest(handler, 0, uuid.New()); got.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("invalid user status = %d, body = %s", got.Code, got.Body.String())

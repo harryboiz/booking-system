@@ -88,7 +88,8 @@ func (impl *EventRepositoryImpl) Update(ctx context.Context, id string, in entit
 			"name": in.Name, "description": in.Description, "start_date": in.StartDate,
 			"end_time":      in.EndTime,
 			"total_tickets": in.TotalTickets, "ticket_price": in.TicketPrice,
-			"updated_at": time.Now(),
+			"max_ticket_per_user": in.MaxTicketPerUser,
+			"updated_at":          time.Now(),
 		})
 		if result.Error != nil {
 			return result.Error

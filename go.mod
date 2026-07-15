@@ -8,6 +8,7 @@ require (
 	github.com/redis/go-redis/v9 v9.7.3
 	github.com/segmentio/kafka-go v0.4.48
 	golang.org/x/crypto v0.38.0
+	golang.org/x/sync v0.14.0
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/postgres v1.6.0
 	gorm.io/gen v0.3.27
@@ -32,7 +33,6 @@ require (
 	github.com/sethvargo/go-retry v0.3.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/mod v0.23.0 // indirect
-	golang.org/x/sync v0.14.0 // indirect
 	golang.org/x/text v0.25.0 // indirect
 	golang.org/x/tools v0.30.0 // indirect
 	gorm.io/datatypes v1.2.4 // indirect

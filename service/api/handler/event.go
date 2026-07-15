@@ -96,27 +96,29 @@ func (h *EventHandler) DeleteEvent(w http.ResponseWriter, r *http.Request) {
 
 func entityFromInput(input dto.EventInput) entity.Event {
 	return entity.Event{
-		Name:         input.Name,
-		Description:  input.Description,
-		StartDate:    input.StartDate,
-		EndTime:      input.EndTime,
-		TotalTickets: input.TotalTickets,
-		TicketPrice:  input.TicketPrice,
+		Name:             input.Name,
+		Description:      input.Description,
+		StartDate:        input.StartDate,
+		EndTime:          input.EndTime,
+		TotalTickets:     input.TotalTickets,
+		TicketPrice:      input.TicketPrice,
+		MaxTicketPerUser: input.MaxTicketPerUser,
 	}
 }
 
 func eventDTO(event entity.Event) dto.Event {
 	return dto.Event{
-		ID:             strconv.FormatInt(event.ID, 10),
-		Name:           event.Name,
-		Description:    event.Description,
-		StartDate:      event.StartDate,
-		EndTime:        event.EndTime,
-		TotalTickets:   event.TotalTickets,
-		TicketPrice:    event.TicketPrice,
-		PendingTickets: event.PendingTickets,
-		ConfirmTickets: event.ConfirmTickets,
-		CancelTickets:  event.CancelTickets,
+		ID:               strconv.FormatInt(event.ID, 10),
+		Name:             event.Name,
+		Description:      event.Description,
+		StartDate:        event.StartDate,
+		EndTime:          event.EndTime,
+		TotalTickets:     event.TotalTickets,
+		TicketPrice:      event.TicketPrice,
+		PendingTickets:   event.PendingTickets,
+		ConfirmTickets:   event.ConfirmTickets,
+		CancelTickets:    event.CancelTickets,
+		MaxTicketPerUser: event.MaxTicketPerUser,
 	}
 }
 

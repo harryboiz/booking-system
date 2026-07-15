@@ -61,10 +61,14 @@ func main() {
 
 		}
 	}(ticketCache)
+	userTicketCache := sharedredis.NewUserTicketCache(cfg.Redis.Address, cfg.Redis.Password, cfg.Redis.DB)
+	defer func(cache *sharedredis.UserTicketCache) {
+		_ = cache.Close()
+	}(userTicketCache)
 	eventRepository := repositoryimpl.NewEventRepository(db)
 	ticketRepository := repositoryimpl.NewTicketRepository(db)
 	updateTicket := kafkaprocessor.NewUpdateTicket(
-		eventRepository, ticketRepository, eventCache, ticketCache, cancelAfter, slog.Default(),
+		eventRepository, ticketRepository, eventCache, ticketCache, userTicketCache, cancelAfter, slog.Default(),
 	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

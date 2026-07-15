@@ -18,6 +18,7 @@ type TicketRepository interface {
 	GetDoneTicketByClientOrderID(context.Context, int64, string) (entity.TicketDone, error)
 	FindPendingTicketsByEventIDs(context.Context, []int64) ([]entity.Ticket, error)
 	FindDoneTicketsByEventIDs(context.Context, []int64) ([]entity.TicketDone, error)
+	FindUserTicketsByEventIDs(context.Context, []int64) ([]entity.UserTicket, error)
 	FindPendingTicketsByIDs(context.Context, []uuid.UUID) ([]entity.Ticket, error)
 	FindDoneTicketsByIDs(context.Context, []uuid.UUID) ([]entity.TicketDone, error)
 	FindExpiredPendingTickets(context.Context, time.Time, int) ([]entity.Ticket, error)
@@ -27,5 +28,6 @@ type TicketRepository interface {
 		[]entity.Ticket,
 		[]entity.TicketDone,
 		[]entity.Event,
+		[]entity.UserTicket,
 	) error
 }

@@ -73,6 +73,9 @@ trong bảng `goose_db_version`.
   `ticket_done` cùng các cột, partition theo `updated_at`. Các ràng buộc unique của
   `ticket_done` có thêm `updated_at` theo yêu cầu của TimescaleDB. Bảng `tickets` có
   partial index theo `created_at` để phục vụ cancellation service.
+- `migrations/004_add_user_ticket_limit.sql`: thêm `events.max_ticket_per_user` và
+  bảng `user_ticket` với khóa `(event_id, user_id)` để lưu số vé `pending + confirm`
+  đang chiếm hạn mức của từng user trong một event.
 
 Cài Goose CLI:
 
@@ -103,7 +106,7 @@ export DATABASE_URL='postgres://ticket:ticket@localhost:5432/ticket?sslmode=disa
 # 3. Tạo/cập nhật schema trước khi generate
 goose -dir migrations postgres "$DATABASE_URL" up
 
-# 4. Generate model từ các cột thật của bảng events, users, tickets và ticket_done
+# 4. Generate model từ các bảng events, users, tickets, ticket_done và user_ticket
 go run ./tools/modelgen
 ```
 
@@ -135,17 +138,21 @@ curl -i -X POST http://localhost:8080/events \
     "start_date": "2026-09-10T09:00:00+07:00",
     "end_time": "2026-09-10T18:00:00+07:00",
     "total_tickets": 200,
+    "max_ticket_per_user": 4,
     "ticket_price": 49.5
   }'
 ```
 
 `start_date` và `end_time` dùng RFC3339; `end_time` không được trước `start_date`.
-Các cột stats chỉ đọc qua API và do worker quản lý.
+`max_ticket_per_user` phải lớn hơn `0`. Các cột stats chỉ đọc qua API và do worker
+quản lý.
 
 ### Tạo pending ticket
 
-Redis lưu snapshot event theo key `events:{event_id}`. API đọc snapshot này và tính số
-vé còn lại bằng `total_tickets - pending_tickets - confirm_tickets`.
+Redis lưu snapshot event theo key `events:{event_id}` và bộ đếm của user theo key
+`user_ticket:{event_id}:{user_id}`. API đọc các snapshot này, tính số vé còn lại bằng
+`total_tickets - pending_tickets - confirm_tickets`, đồng thời so sánh `ticket_count`
+với `max_ticket_per_user`.
 
 Gọi API:
 
@@ -167,6 +174,8 @@ vé nhưng không giảm tồn kho, sinh UUID rồi publish `UpdatedTicket` vào
 mapping từ client order sang UUID; worker tiếp tục cập nhật tồn kho, snapshot pending
 ticket và sửa lại cache khi xử lý hoặc reconcile.
 Nếu hết vé, API trả `409 Conflict` với `{"error":"tickets sold out"}`.
+Nếu user đã đạt hạn mức của event, API trả `409 Conflict` với
+`{"error":"user ticket limit reached"}`.
 
 ### Lấy ticket
 
@@ -252,23 +261,25 @@ order, API trả `409`.
 
 Khi khởi động, worker đọc các event còn hơn một ngày mới kết thúc và có
 `event_id % 100` thuộc `message_keys`, rồi đồng bộ snapshot `events:{event_id}`, số
-vé còn lại `tickets:reserved:{event_id}`, pending ticket và client-order mapping của
-các event đó sang Redis.
+vé còn lại `tickets:reserved:{event_id}`, bộ đếm `user_ticket`, pending ticket và
+client-order mapping của các event đó sang Redis.
 Redis không phải source of truth; nếu Redis down hoặc cache miss, worker query
 PostgreSQL và tiếp tục xử lý.
 
 Worker gom tối đa 10.000 message, lấy ticket ID ở cả `tickets` và `ticket_done`, rồi
 duyệt message theo thứ tự nhận:
 
-- `pending`: insert vào `tickets` nếu ticket chưa tồn tại ở cả hai bảng.
+- `pending`: insert vào `tickets` nếu ticket chưa tồn tại ở cả hai bảng và user chưa
+  đạt `max_ticket_per_user`; sau đó tăng `user_ticket.ticket_count`.
 - `confirm`: chỉ chuyển ticket `pending` từ `tickets` sang `ticket_done` với status
-  `confirm`.
+  `confirm`; bộ đếm user không đổi.
 - `cancel`: chỉ chuyển ticket `pending` đã cũ từ 20 phút sang `ticket_done` với
-  status `cancelled`.
+  status `cancelled`, sau đó giảm bộ đếm user.
 
-Ticket và event stats của cả batch được ghi trong cùng một PostgreSQL transaction.
-Sau commit, worker refresh Redis rồi mới commit Kafka offset. Pending order được cache
-đầy đủ tại `tickets:{order_id}`. Khi order hoàn tất, worker xóa snapshot này nhưng giữ
+Ticket, event stats và user-ticket counters của cả batch được ghi trong cùng một
+PostgreSQL transaction. Sau commit, worker refresh Redis rồi mới commit Kafka offset.
+Pending order được cache đầy đủ tại `tickets:{order_id}`. Khi order hoàn tất, worker
+xóa snapshot này nhưng giữ
 key `tickets:client-order-id:{user_id}:{client_order_id}` trỏ tới done ticket ID.
 Duplicate hoặc message không đúng state được bỏ qua, nên batch có thể retry theo cơ
 chế at-least-once.

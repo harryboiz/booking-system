@@ -58,7 +58,7 @@ func TestProcessCreatesPendingTicketAndUpdatesEventStats(t *testing.T) {
 	createdAt := time.Now().UTC().Add(-time.Minute)
 	repository := newProcessorRepository([]entity.Event{{ID: 101}})
 	cache := &reconcileCache{}
-	processor := NewUpdateTicket(repository, repository, cache, cache, 20*time.Minute, nil)
+	processor := NewUpdateTicket(repository, repository, cache, cache, cache, 20*time.Minute, nil)
 	message := sharedkafka.UpdatedTicket{
 		ID: ticketID, EventID: 101, UserID: 10, ClientOrderID: "order-1", Status: statusPending,
 	}
@@ -84,8 +84,82 @@ func TestProcessCreatesPendingTicketAndUpdatesEventStats(t *testing.T) {
 	if len(repository.updatedEvents) != 1 || repository.updatedEvents[0].PendingTickets != 1 {
 		t.Fatalf("updated events = %+v", repository.updatedEvents)
 	}
+	if len(repository.updatedUserTickets) != 1 || repository.updatedUserTickets[0].TicketCount != 1 {
+		t.Fatalf("updated user tickets = %+v", repository.updatedUserTickets)
+	}
 	if len(cache.pending) != 1 || cache.pending[0].ID != ticketID || len(cache.done) != 0 {
 		t.Fatalf("cached pending = %+v, done = %+v", cache.pending, cache.done)
+	}
+}
+
+func TestProcessEnforcesMaxTicketPerUserWithinBatch(t *testing.T) {
+	repository := newProcessorRepository([]entity.Event{{ID: 101, MaxTicketPerUser: 2}})
+	repository.userTickets = []entity.UserTicket{{EventID: 101, UserID: 10, TicketCount: 1}}
+	cache := &reconcileCache{}
+	processor := NewUpdateTicket(repository, repository, cache, cache, cache, 20*time.Minute, nil)
+	first := sharedkafka.UpdatedTicket{
+		ID: uuid.New(), EventID: 101, UserID: 10, ClientOrderID: "order-1", Status: statusPending,
+	}
+	second := sharedkafka.UpdatedTicket{
+		ID: uuid.New(), EventID: 101, UserID: 10, ClientOrderID: "order-2", Status: statusPending,
+	}
+
+	if err := processor.Process(context.Background(), []kafkago.Message{
+		ticketRecord(t, first, time.Now().UTC()),
+		ticketRecord(t, second, time.Now().UTC()),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(repository.inserted) != 1 || repository.inserted[0].ID != first.ID {
+		t.Fatalf("inserted tickets = %+v", repository.inserted)
+	}
+	if len(repository.updatedUserTickets) != 1 || repository.updatedUserTickets[0].TicketCount != 2 {
+		t.Fatalf("updated user tickets = %+v", repository.updatedUserTickets)
+	}
+	if len(cache.userTickets) != 1 || cache.userTickets[0].TicketCount != 2 {
+		t.Fatalf("cached user tickets = %+v", cache.userTickets)
+	}
+}
+
+func TestProcessLoadsRequiredStateInParallel(t *testing.T) {
+	base := newProcessorRepository([]entity.Event{{ID: 101, MaxTicketPerUser: 1}})
+	repository := &parallelQueryRepository{
+		processorRepository: base,
+		started:             make(chan string, 4),
+		release:             make(chan struct{}),
+	}
+	cache := &reconcileCache{}
+	processor := NewUpdateTicket(repository, repository, cache, cache, cache, 20*time.Minute, nil)
+	message := sharedkafka.UpdatedTicket{
+		ID: uuid.New(), EventID: 101, UserID: 10, ClientOrderID: "parallel-order", Status: statusPending,
+	}
+	record := ticketRecord(t, message, time.Now().UTC())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- processor.Process(ctx, []kafkago.Message{record})
+	}()
+
+	started := make(map[string]bool, 4)
+	for len(started) < 4 {
+		select {
+		case query := <-repository.started:
+			started[query] = true
+		case <-time.After(time.Second):
+			t.Fatalf("queries did not run in parallel; started = %v", started)
+		}
+	}
+	close(repository.release)
+
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("processor did not finish after releasing queries")
 	}
 }
 
@@ -99,7 +173,7 @@ func TestProcessConfirmIsIdempotentForDuplicateMessages(t *testing.T) {
 	repository := newProcessorRepository([]entity.Event{{ID: 202, PendingTickets: 1}})
 	repository.pending = []entity.Ticket{active}
 	cache := &reconcileCache{}
-	processor := NewUpdateTicket(repository, repository, cache, cache, 20*time.Minute, nil)
+	processor := NewUpdateTicket(repository, repository, cache, cache, cache, 20*time.Minute, nil)
 	message := sharedkafka.UpdatedTicket{
 		ID: ticketID, EventID: 202, UserID: 99, ClientOrderID: "ignored-message-order", Status: statusConfirm,
 	}
@@ -138,8 +212,12 @@ func TestProcessCancelOnlyExpiresOldPendingTicket(t *testing.T) {
 		{ID: oldID, EventID: 303, UserID: 10, ClientOrderID: "old", Status: statusPending, CreatedAt: now.Add(-21 * time.Minute)},
 		{ID: youngID, EventID: 303, UserID: 11, ClientOrderID: "young", Status: statusPending, CreatedAt: now.Add(-19 * time.Minute)},
 	}
+	repository.userTickets = []entity.UserTicket{
+		{EventID: 303, UserID: 10, TicketCount: 1},
+		{EventID: 303, UserID: 11, TicketCount: 1},
+	}
 	cache := &reconcileCache{}
-	processor := NewUpdateTicket(repository, repository, cache, cache, 20*time.Minute, nil)
+	processor := NewUpdateTicket(repository, repository, cache, cache, cache, 20*time.Minute, nil)
 	records := []kafkago.Message{
 		ticketRecord(t, sharedkafka.UpdatedTicket{
 			ID: oldID, EventID: 303, UserID: 10, ClientOrderID: "old", Status: statusCancel,
@@ -168,6 +246,10 @@ func TestProcessCancelOnlyExpiresOldPendingTicket(t *testing.T) {
 		len(cache.done) != 1 || cache.done[0].ID != oldID {
 		t.Fatalf("cached pending = %+v, done = %+v", cache.pending, cache.done)
 	}
+	if len(repository.updatedUserTickets) != 1 || repository.updatedUserTickets[0].UserID != 10 ||
+		repository.updatedUserTickets[0].TicketCount != 0 {
+		t.Fatalf("updated user tickets = %+v", repository.updatedUserTickets)
+	}
 }
 
 func ticketRecord(
@@ -193,12 +275,13 @@ func TestReconcileCachesTicketsForWorkerEvents(t *testing.T) {
 	pendingID := uuid.New()
 	doneID := uuid.New()
 	repository := &reconcileRepository{
-		events:  []entity.Event{{ID: 101}},
-		pending: []entity.Ticket{{ID: pendingID, EventID: 101, UserID: 10, ClientOrderID: "pending-1"}},
-		done:    []entity.TicketDone{{ID: doneID, EventID: 101, UserID: 11, ClientOrderID: "done-1"}},
+		events:      []entity.Event{{ID: 101}},
+		pending:     []entity.Ticket{{ID: pendingID, EventID: 101, UserID: 10, ClientOrderID: "pending-1"}},
+		done:        []entity.TicketDone{{ID: doneID, EventID: 101, UserID: 11, ClientOrderID: "done-1"}},
+		userTickets: []entity.UserTicket{{EventID: 101, UserID: 10, TicketCount: 1}},
 	}
 	cache := &reconcileCache{}
-	processor := NewUpdateTicket(repository, repository, cache, cache, 15*time.Minute, nil)
+	processor := NewUpdateTicket(repository, repository, cache, cache, cache, 15*time.Minute, nil)
 
 	if err := processor.Reconcile(context.Background(), []int{1}); err != nil {
 		t.Fatal(err)
@@ -218,22 +301,87 @@ func TestReconcileCachesTicketsForWorkerEvents(t *testing.T) {
 	if len(cache.done) != 1 || cache.done[0].ID != doneID {
 		t.Fatalf("cached done orders = %+v", cache.done)
 	}
+	if len(cache.userTickets) != 1 || cache.userTickets[0].TicketCount != 1 {
+		t.Fatalf("cached user tickets = %+v", cache.userTickets)
+	}
 }
 
 type reconcileRepository struct {
 	events          []entity.Event
 	pending         []entity.Ticket
 	done            []entity.TicketDone
+	userTickets     []entity.UserTicket
 	pendingEventIDs []int64
 	doneEventIDs    []int64
 }
 
 type processorRepository struct {
 	*reconcileRepository
-	inserted      []entity.Ticket
-	deleted       []entity.Ticket
-	completed     []entity.TicketDone
-	updatedEvents []entity.Event
+	inserted           []entity.Ticket
+	deleted            []entity.Ticket
+	completed          []entity.TicketDone
+	updatedEvents      []entity.Event
+	updatedUserTickets []entity.UserTicket
+}
+
+type parallelQueryRepository struct {
+	*processorRepository
+	started chan string
+	release chan struct{}
+}
+
+func (repository *parallelQueryRepository) waitForRelease(ctx context.Context, query string) error {
+	select {
+	case repository.started <- query:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-repository.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (repository *parallelQueryRepository) FindEventsByIDs(
+	ctx context.Context,
+	_ []int64,
+) ([]entity.Event, error) {
+	if err := repository.waitForRelease(ctx, "events"); err != nil {
+		return nil, err
+	}
+	return repository.events, nil
+}
+
+func (repository *parallelQueryRepository) FindPendingTicketsByIDs(
+	ctx context.Context,
+	_ []uuid.UUID,
+) ([]entity.Ticket, error) {
+	if err := repository.waitForRelease(ctx, "pending"); err != nil {
+		return nil, err
+	}
+	return repository.pending, nil
+}
+
+func (repository *parallelQueryRepository) FindDoneTicketsByIDs(
+	ctx context.Context,
+	_ []uuid.UUID,
+) ([]entity.TicketDone, error) {
+	if err := repository.waitForRelease(ctx, "done"); err != nil {
+		return nil, err
+	}
+	return repository.done, nil
+}
+
+func (repository *parallelQueryRepository) FindUserTicketsByEventIDs(
+	ctx context.Context,
+	_ []int64,
+) ([]entity.UserTicket, error) {
+	if err := repository.waitForRelease(ctx, "user_ticket"); err != nil {
+		return nil, err
+	}
+	return repository.userTickets, nil
 }
 
 func newProcessorRepository(events []entity.Event) *processorRepository {
@@ -267,11 +415,13 @@ func (repository *processorRepository) PersistTicketChanges(
 	deleted []entity.Ticket,
 	completed []entity.TicketDone,
 	updatedEvents []entity.Event,
+	updatedUserTickets []entity.UserTicket,
 ) error {
 	repository.inserted = append([]entity.Ticket(nil), inserted...)
 	repository.deleted = append([]entity.Ticket(nil), deleted...)
 	repository.completed = append([]entity.TicketDone(nil), completed...)
 	repository.updatedEvents = append([]entity.Event(nil), updatedEvents...)
+	repository.updatedUserTickets = append([]entity.UserTicket(nil), updatedUserTickets...)
 	return nil
 }
 
@@ -357,6 +507,13 @@ func (repository *reconcileRepository) FindDoneTicketsByEventIDs(
 	return repository.done, nil
 }
 
+func (repository *reconcileRepository) FindUserTicketsByEventIDs(
+	_ context.Context,
+	_ []int64,
+) ([]entity.UserTicket, error) {
+	return repository.userTickets, nil
+}
+
 func (repository *reconcileRepository) FindPendingTicketsByIDs(
 	context.Context,
 	[]uuid.UUID,
@@ -377,14 +534,24 @@ func (repository *reconcileRepository) PersistTicketChanges(
 	[]entity.Ticket,
 	[]entity.TicketDone,
 	[]entity.Event,
+	[]entity.UserTicket,
 ) error {
 	return nil
 }
 
 type reconcileCache struct {
-	events  []entity.Event
-	pending []entity.Ticket
-	done    []entity.TicketDone
+	events      []entity.Event
+	pending     []entity.Ticket
+	done        []entity.TicketDone
+	userTickets []entity.UserTicket
+}
+
+func (cache *reconcileCache) SetUserTickets(
+	_ context.Context,
+	userTickets []entity.UserTicket,
+) error {
+	cache.userTickets = append([]entity.UserTicket(nil), userTickets...)
+	return nil
 }
 
 func (cache *reconcileCache) GetEvents(

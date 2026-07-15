@@ -102,6 +102,23 @@ func (impl *TicketRepositoryImpl) FindDoneTicketsByEventIDs(
 	return tickets, nil
 }
 
+func (impl *TicketRepositoryImpl) FindUserTicketsByEventIDs(
+	ctx context.Context,
+	eventIDs []int64,
+) ([]entity.UserTicket, error) {
+	if len(eventIDs) == 0 {
+		return []entity.UserTicket{}, nil
+	}
+	var userTickets []entity.UserTicket
+	if err := impl.db.WithContext(ctx).
+		Where("event_id IN ?", eventIDs).
+		Order("event_id, user_id").
+		Find(&userTickets).Error; err != nil {
+		return nil, fmt.Errorf("load user ticket counters by event ids: %w", err)
+	}
+	return userTickets, nil
+}
+
 func (impl *TicketRepositoryImpl) FindPendingTicketsByIDs(
 	ctx context.Context,
 	ticketIDs []uuid.UUID,
@@ -149,6 +166,7 @@ func (impl *TicketRepositoryImpl) PersistTicketChanges(
 	deletePendingTickets []entity.Ticket,
 	doneTickets []entity.TicketDone,
 	updatedEventStats []entity.Event,
+	updatedUserTickets []entity.UserTicket,
 ) error {
 	return impl.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if len(pendingTickets) > 0 {
@@ -177,6 +195,16 @@ func (impl *TicketRepositoryImpl) PersistTicketChanges(
 			if err := tx.Clauses(onConflict).
 				CreateInBatches(&updatedEventStats, workerDatabaseBatchSize).Error; err != nil {
 				return fmt.Errorf("batch update event stats: %w", err)
+			}
+		}
+		if len(updatedUserTickets) > 0 {
+			onConflict := clause.OnConflict{
+				Columns:   []clause.Column{{Name: "event_id"}, {Name: "user_id"}},
+				DoUpdates: clause.AssignmentColumns([]string{"ticket_count", "updated_at"}),
+			}
+			if err := tx.Clauses(onConflict).
+				CreateInBatches(&updatedUserTickets, workerDatabaseBatchSize).Error; err != nil {
+				return fmt.Errorf("batch update user ticket counters: %w", err)
 			}
 		}
 		return nil

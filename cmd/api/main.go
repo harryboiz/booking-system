@@ -54,6 +54,12 @@ func main() {
 		apiConfig.Redis.DB,
 	)
 	defer eventCache.Close()
+	userTicketCache := redis.NewUserTicketCache(
+		apiConfig.Redis.Address,
+		apiConfig.Redis.Password,
+		apiConfig.Redis.DB,
+	)
+	defer userTicketCache.Close()
 	publisher := kafka.NewTicketPublisher(apiConfig.Kafka.Brokers, apiConfig.Kafka.Topic)
 	defer publisher.Close()
 
@@ -65,6 +71,7 @@ func main() {
 		ticketCache,
 		ticketStore,
 		eventCache,
+		userTicketCache,
 		publisher,
 		paymentSimulator,
 	)
