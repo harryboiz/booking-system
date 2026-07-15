@@ -26,6 +26,7 @@ const (
 type EventCache interface {
 	GetEvents(context.Context, []int64) (map[int64]entity.Event, error)
 	SetEvents(context.Context, []entity.Event) error
+	SetOrders(context.Context, []entity.Ticket, []entity.TicketDone) error
 }
 
 type Processor struct {
@@ -60,7 +61,20 @@ func (processor *Processor) Reconcile(ctx context.Context, messageKeys []int) er
 	if err != nil {
 		return err
 	}
+	eventIDs := make([]int64, len(events))
+	for index := range events {
+		eventIDs[index] = events[index].ID
+	}
+	pendingOrders, err := processor.repository.FindPendingTicketsByEventIDs(ctx, eventIDs)
+	if err != nil {
+		return err
+	}
+	doneOrders, err := processor.repository.FindDoneTicketsByEventIDs(ctx, eventIDs)
+	if err != nil {
+		return err
+	}
 	processor.updateEventCache(ctx, events)
+	processor.updateOrderCache(ctx, pendingOrders, doneOrders)
 	return nil
 }
 
@@ -93,9 +107,9 @@ func (processor *Processor) Process(ctx context.Context, records []kafkago.Messa
 	for index := range activeTickets {
 		activeByID[activeTickets[index].ID] = &activeTickets[index]
 	}
-	doneByID := make(map[uuid.UUID]struct{}, len(doneTickets))
-	for _, ticket := range doneTickets {
-		doneByID[ticket.ID] = struct{}{}
+	doneByID := make(map[uuid.UUID]*entity.TicketDone, len(doneTickets))
+	for index := range doneTickets {
+		doneByID[doneTickets[index].ID] = &doneTickets[index]
 	}
 
 	now := time.Now().UTC()
@@ -130,6 +144,7 @@ func (processor *Processor) Process(ctx context.Context, records []kafkago.Messa
 				UpdatedAt:     now,
 			}
 			pendingTickets = append(pendingTickets, ticket)
+			activeByID[ticket.ID] = &pendingTickets[len(pendingTickets)-1]
 			event.PendingTickets++
 			changed[event.ID] = event
 
@@ -142,7 +157,10 @@ func (processor *Processor) Process(ctx context.Context, records []kafkago.Messa
 				continue
 			}
 			deletePendingTickets = append(deletePendingTickets, *active)
-			newDoneTickets = append(newDoneTickets, completedTicket(active, statusConfirm, now))
+			done := completedTicket(active, statusConfirm, now)
+			newDoneTickets = append(newDoneTickets, done)
+			delete(activeByID, active.ID)
+			doneByID[done.ID] = &newDoneTickets[len(newDoneTickets)-1]
 			event.PendingTickets--
 			event.ConfirmTickets++
 			changed[event.ID] = event
@@ -156,8 +174,10 @@ func (processor *Processor) Process(ctx context.Context, records []kafkago.Messa
 				continue
 			}
 			deletePendingTickets = append(deletePendingTickets, *active)
-			newDoneTickets = append(newDoneTickets, completedTicket(active, statusCancelled, now))
+			done := completedTicket(active, statusCancelled, now)
+			newDoneTickets = append(newDoneTickets, done)
 			delete(activeByID, active.ID)
+			doneByID[done.ID] = &newDoneTickets[len(newDoneTickets)-1]
 			event.PendingTickets--
 			event.CancelTickets++
 			changed[event.ID] = event
@@ -176,6 +196,7 @@ func (processor *Processor) Process(ctx context.Context, records []kafkago.Messa
 		return err
 	}
 	processor.updateEventCache(ctx, updatedEventStats)
+	processor.updateOrderCache(ctx, pendingOrders(activeByID), completedOrders(doneByID))
 	return nil
 }
 
@@ -220,6 +241,33 @@ func (processor *Processor) updateEventCache(ctx context.Context, events []entit
 		// PostgreSQL is the source of truth. A later batch or startup reconciliation repairs Redis.
 		processor.logger.Warn("cannot update events in redis", "error", err)
 	}
+}
+
+func (processor *Processor) updateOrderCache(
+	ctx context.Context,
+	pendingOrders []entity.Ticket,
+	doneOrders []entity.TicketDone,
+) {
+	if err := processor.cache.SetOrders(ctx, pendingOrders, doneOrders); err != nil {
+		// PostgreSQL is the source of truth. A duplicate message can repair a stale cache later.
+		processor.logger.Warn("cannot update orders in redis", "error", err)
+	}
+}
+
+func pendingOrders(orders map[uuid.UUID]*entity.Ticket) []entity.Ticket {
+	result := make([]entity.Ticket, 0, len(orders))
+	for _, order := range orders {
+		result = append(result, *order)
+	}
+	return result
+}
+
+func completedOrders(orders map[uuid.UUID]*entity.TicketDone) []entity.TicketDone {
+	result := make([]entity.TicketDone, 0, len(orders))
+	for _, order := range orders {
+		result = append(result, *order)
+	}
+	return result
 }
 
 func uniqueEventIDs(messages []decodedMessage) []int64 {

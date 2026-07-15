@@ -160,9 +160,10 @@ với `{"error":"tickets sold out"}`.
 ## Ticket worker
 
 Khi khởi động, worker đọc các event còn hơn một ngày mới kết thúc và có
-`event_id % 100` thuộc `message_keys`, rồi đồng bộ snapshot `events:{event_id}` và số
-vé còn lại `tickets:reserved:{event_id}` sang Redis. Redis không phải source of truth;
-nếu Redis down hoặc cache miss, worker query PostgreSQL và tiếp tục xử lý.
+`event_id % 100` thuộc `message_keys`, rồi đồng bộ snapshot `events:{event_id}`, số
+vé còn lại `tickets:reserved:{event_id}` và cache order của các event đó sang Redis.
+Redis không phải source of truth; nếu Redis down hoặc cache miss, worker query
+PostgreSQL và tiếp tục xử lý.
 
 Worker gom tối đa 10.000 message, lấy ticket ID ở cả `tickets` và `ticket_done`, rồi
 duyệt message theo thứ tự nhận:
@@ -174,8 +175,11 @@ duyệt message theo thứ tự nhận:
   status `cancelled`.
 
 Ticket và event stats của cả batch được ghi trong cùng một PostgreSQL transaction.
-Sau commit, worker refresh Redis rồi mới commit Kafka offset. Duplicate hoặc message
-không đúng state được bỏ qua, nên batch có thể retry theo cơ chế at-least-once.
+Sau commit, worker refresh Redis rồi mới commit Kafka offset. Mỗi order được cache đầy
+đủ tại `tickets:{order_id}`; key
+`tickets:client-order-id:{user_id}:{client_order_id}` trỏ tới `order_id`. Duplicate
+hoặc message không đúng state được bỏ qua, nên batch có thể retry theo cơ chế
+at-least-once.
 
 ## Test
 

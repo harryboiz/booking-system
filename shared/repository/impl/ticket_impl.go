@@ -54,6 +54,40 @@ func (impl *TicketRepositoryImpl) FindEventsByIDs(
 	return events, nil
 }
 
+func (impl *TicketRepositoryImpl) FindPendingTicketsByEventIDs(
+	ctx context.Context,
+	eventIDs []int64,
+) ([]entity.Ticket, error) {
+	if len(eventIDs) == 0 {
+		return []entity.Ticket{}, nil
+	}
+	var tickets []entity.Ticket
+	if err := impl.db.WithContext(ctx).
+		Where("event_id IN ?", eventIDs).
+		Order("id").
+		Find(&tickets).Error; err != nil {
+		return nil, fmt.Errorf("load active tickets by event ids: %w", err)
+	}
+	return tickets, nil
+}
+
+func (impl *TicketRepositoryImpl) FindDoneTicketsByEventIDs(
+	ctx context.Context,
+	eventIDs []int64,
+) ([]entity.TicketDone, error) {
+	if len(eventIDs) == 0 {
+		return []entity.TicketDone{}, nil
+	}
+	var tickets []entity.TicketDone
+	if err := impl.db.WithContext(ctx).
+		Where("event_id IN ?", eventIDs).
+		Order("id").
+		Find(&tickets).Error; err != nil {
+		return nil, fmt.Errorf("load completed tickets by event ids: %w", err)
+	}
+	return tickets, nil
+}
+
 func (impl *TicketRepositoryImpl) FindPendingTicketsByIDs(
 	ctx context.Context,
 	ticketIDs []uuid.UUID,

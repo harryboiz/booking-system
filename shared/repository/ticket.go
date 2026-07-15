@@ -12,6 +12,8 @@ import (
 type TicketRepository interface {
 	FindEventsByMessageKeys(context.Context, []int, int) ([]entity.Event, error)
 	FindEventsByIDs(context.Context, []int64) ([]entity.Event, error)
+	FindPendingTicketsByEventIDs(context.Context, []int64) ([]entity.Ticket, error)
+	FindDoneTicketsByEventIDs(context.Context, []int64) ([]entity.TicketDone, error)
 	FindPendingTicketsByIDs(context.Context, []uuid.UUID) ([]entity.Ticket, error)
 	FindDoneTicketsByIDs(context.Context, []uuid.UUID) ([]entity.TicketDone, error)
 	PersistTicketChanges(
