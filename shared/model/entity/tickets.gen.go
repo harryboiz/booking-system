@@ -6,18 +6,21 @@ package entity
 
 import (
 	"time"
+
+	"github.com/google/uuid"
 )
 
 const TableNameTicket = "tickets"
 
 // Ticket mapped from table <tickets>
 type Ticket struct {
-	ID        int64     `gorm:"column:id;type:bigint;primaryKey;autoIncrement:true" json:"id"`
-	EventID   int64     `gorm:"column:event_id;type:bigint;not null;index:idx_tickets_event_id,priority:1" json:"event_id"`
-	UserID    int64     `gorm:"column:user_id;type:bigint;not null;index:idx_tickets_user_id,priority:1" json:"user_id"`
-	Status    string    `gorm:"column:status;type:ticket_status;not null;index:idx_tickets_status,priority:1;default:pending" json:"status"`
-	CreatedAt time.Time `gorm:"column:created_at;type:timestamp with time zone;not null;default:now()" json:"created_at"`
-	UpdatedAt time.Time `gorm:"column:updated_at;type:timestamp with time zone;not null;default:now()" json:"updated_at"`
+	ID            uuid.UUID `gorm:"column:id;type:uuid;primaryKey" json:"id"`
+	EventID       int64     `gorm:"column:event_id;type:bigint;not null;index:idx_tickets_event_id,priority:1" json:"event_id"`
+	UserID        int64     `gorm:"column:user_id;type:bigint;not null;index:idx_tickets_user_id,priority:1;uniqueIndex:idx_tickets_user_id_client_order_id,priority:1" json:"user_id"`
+	ClientOrderID string    `gorm:"column:client_order_id;type:character varying(255);not null;uniqueIndex:idx_tickets_user_id_client_order_id,priority:2" json:"client_order_id"`
+	Status        string    `gorm:"column:status;type:ticket_status;not null;index:idx_tickets_status,priority:1;default:pending" json:"status"`
+	CreatedAt     time.Time `gorm:"column:created_at;type:timestamp with time zone;not null;default:now()" json:"created_at"`
+	UpdatedAt     time.Time `gorm:"column:updated_at;type:timestamp with time zone;not null;default:now()" json:"updated_at"`
 }
 
 // TableName Ticket's table name

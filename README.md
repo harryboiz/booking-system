@@ -1,13 +1,15 @@
 # Ticket Event API
 
-REST API CRUD cho event, viết bằng Go, dùng GORM và lưu dữ liệu trong PostgreSQL.
+REST API CRUD cho event và nhận yêu cầu giữ vé bất đồng bộ, viết bằng Go. Dữ liệu
+được lưu trong PostgreSQL, số vé còn lại được giữ atomic trên Redis và yêu cầu pending
+được publish vào Kafka.
 
 ## Chạy project
 
 Yêu cầu Go 1.23 trở lên, Docker và Docker Compose.
 
 ```bash
-docker compose up -d postgres
+docker compose up -d postgres redis kafka kafka-init
 export DATABASE_URL='postgres://ticket:ticket@localhost:5432/ticket?sslmode=disable'
 go run ./cmd/api
 ```
@@ -21,11 +23,14 @@ Server chạy tại `http://localhost:8080`. Kiểm tra bằng `GET /health`. Mi
 
 - `config/services/api/config.local.yml`: địa chỉ HTTP server.
 - `config/shared/postgres/config.local.yml`: kết nối PostgreSQL.
+- `config/shared/redis/config.local.yml`: kết nối Redis.
+- `config/shared/kafka/config.local.yml`: Kafka brokers và topic `ticket`.
 
 Config API dùng `includes` để mượn cấu hình PostgreSQL, với đường dẫn được tính từ
 vị trí file API. Giá trị trong file API sẽ override giá trị được include nếu trùng key.
 Model generator vẫn có thể đọc trực tiếp config PostgreSQL. Biến môi trường
-`DATABASE_URL`, nếu được khai báo, sẽ override cấu hình PostgreSQL trong YAML.
+`DATABASE_URL`, `REDIS_ADDR`, `REDIS_PASSWORD`, `REDIS_DB`, `KAFKA_BROKERS` và
+`KAFKA_TOPIC`, nếu được khai báo, sẽ override cấu hình tương ứng trong YAML.
 
 ## Database migration
 
@@ -34,7 +39,8 @@ trong bảng `goose_db_version`.
 
 - `migrations/001_create_events.sql`: tạo bảng `events`.
 - `migrations/002_create_users.sql`: tạo bảng `users` và unique index cho email.
-- `migrations/003_create_tickets.sql`: tạo bảng `tickets`, liên kết user với event.
+- `migrations/003_create_tickets.sql`: tạo bảng `tickets` với UUID do API sinh và
+  cặp `(user_id, client_order_id)` unique, liên kết user với event.
 
 Cài Goose CLI:
 
@@ -82,6 +88,7 @@ migration/schema, áp dụng migration rồi chạy lại `go run ./tools/modelg
 | `GET` | `/events/{id}` | Lấy một event |
 | `PUT` | `/events/{id}` | Cập nhật toàn bộ event |
 | `DELETE` | `/events/{id}` | Xóa event |
+| `POST` | `/tickets/pending` | Giữ một vé trên Redis và gửi yêu cầu pending vào Kafka |
 
 Ví dụ tạo event:
 
@@ -98,6 +105,35 @@ curl -i -X POST http://localhost:8080/events \
 ```
 
 `date_time` dùng định dạng RFC3339. `total_tickets` và `ticket_price` phải lớn hơn hoặc bằng 0.
+
+### Tạo pending ticket
+
+Redis lưu số vé có thể reserve theo key `tickets:reserved:{event_id}`. Ví dụ event 1
+còn 100 vé:
+
+```bash
+docker compose exec redis redis-cli SET tickets:reserved:1 100
+```
+
+Gọi API:
+
+```bash
+curl -i -X POST http://localhost:8080/tickets/pending \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "user_id": 10,
+    "event_id": 1,
+    "client_order_id": "order-20260715-0001"
+  }'
+```
+
+API dùng Redis `SETNX` để kiểm tra và giữ atomic key
+`tickets:client-order-id:{user_id}:{client_order_id}`, rồi từ chối nếu key đã tồn tại.
+Key được giữ lại để chặn retry, kể cả khi các bước tiếp theo thất bại. Sau đó API
+kiểm tra Redis còn vé nhưng không giảm tồn kho, sinh UUID rồi publish `UpdatedTicket`
+vào topic Kafka `ticket` với key là `event_id`. Kafka consumer chịu trách nhiệm giảm
+tồn kho. API trả `202 Accepted` với `ticket_id`; nếu hết vé, API trả `409 Conflict`
+với `{"error":"tickets sold out"}`.
 
 ## Test
 

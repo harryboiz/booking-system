@@ -3,3 +3,5 @@ server:
 
 includes:
   - ../../shared/postgres/config.local.yml
+  - ../../shared/redis/config.local.yml
+  - ../../shared/kafka/config.local.yml

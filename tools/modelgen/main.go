@@ -36,6 +36,7 @@ func main() {
 		FieldWithTypeTag:  true,
 	})
 	generator.UseDB(db)
+	generator.WithImportPkgPath("github.com/google/uuid")
 	generator.WithJSONTagNameStrategy(func(column string) string { return column })
 
 	// PostgreSQL NUMERIC is generated as string by default. The API performs
@@ -49,7 +50,11 @@ func main() {
 		"users",
 		gen.FieldJSONTag("password_hash", "-"),
 	)
-	generator.GenerateModel("tickets")
+	generator.GenerateModel(
+		"tickets",
+		// Keep the generated ticket ID aligned with the UUID created by the API.
+		gen.FieldType("id", "uuid.UUID"),
+	)
 	generator.Execute()
 
 	fmt.Println("generated database models for events, users and tickets")
