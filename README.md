@@ -40,7 +40,9 @@ trong bảng `goose_db_version`.
 - `migrations/001_create_events.sql`: tạo bảng `events`.
 - `migrations/002_create_users.sql`: tạo bảng `users` và unique index cho email.
 - `migrations/003_create_tickets.sql`: tạo bảng `tickets` với UUID do API sinh và
-  cặp `(user_id, client_order_id)` unique, liên kết user với event.
+  cặp `(user_id, client_order_id)` unique; đồng thời tạo hypertable TimescaleDB
+  `ticket_done` cùng các cột, partition theo `updated_at`. Các ràng buộc unique của
+  `ticket_done` có thêm `updated_at` theo yêu cầu của TimescaleDB.
 
 Cài Goose CLI:
 
@@ -71,7 +73,7 @@ export DATABASE_URL='postgres://ticket:ticket@localhost:5432/ticket?sslmode=disa
 # 3. Tạo/cập nhật schema trước khi generate
 goose -dir migrations postgres "$DATABASE_URL" up
 
-# 4. Generate model từ các cột thật của bảng events, users và tickets
+# 4. Generate model từ các cột thật của bảng events, users, tickets và ticket_done
 go run ./tools/modelgen
 ```
 

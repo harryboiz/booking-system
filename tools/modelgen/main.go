@@ -55,7 +55,12 @@ func main() {
 		// Keep the generated ticket ID aligned with the UUID created by the API.
 		gen.FieldType("id", "uuid.UUID"),
 	)
+	generator.GenerateModel(
+		"ticket_done",
+		// Keep the generated ticket ID aligned with the UUID created by the API.
+		gen.FieldType("id", "uuid.UUID"),
+	)
 	generator.Execute()
 
-	fmt.Println("generated database models for events, users and tickets")
+	fmt.Println("generated database models for events, users, tickets and ticket_done")
 }
