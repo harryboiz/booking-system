@@ -20,6 +20,11 @@ type ConfirmTicketInput struct {
 	TicketID uuid.UUID `json:"ticket_id"`
 }
 
+type CreateTicketPaymentInput struct {
+	UserID   int64     `json:"user_id"`
+	TicketID uuid.UUID `json:"ticket_id"`
+}
+
 type GetTicketInput struct {
 	UserID        int64
 	TicketID      uuid.UUID
@@ -27,10 +32,18 @@ type GetTicketInput struct {
 }
 
 func (input ConfirmTicketInput) Validate() error {
-	if input.UserID <= 0 {
+	return validateTicketOwner(input.UserID, input.TicketID)
+}
+
+func (input CreateTicketPaymentInput) Validate() error {
+	return validateTicketOwner(input.UserID, input.TicketID)
+}
+
+func validateTicketOwner(userID int64, ticketID uuid.UUID) error {
+	if userID <= 0 {
 		return errors.New("user_id must be a positive integer")
 	}
-	if input.TicketID == uuid.Nil {
+	if ticketID == uuid.Nil {
 		return errors.New("ticket_id is required")
 	}
 	return nil
@@ -55,6 +68,11 @@ func (input PendingTicketInput) Validate() error {
 
 type PendingTicket struct {
 	TicketID uuid.UUID `json:"ticket_id"`
+}
+
+type TicketPayment struct {
+	PayPalOrderID string `json:"paypal_order_id"`
+	PaymentURL    string `json:"payment_url"`
 }
 
 type Ticket struct {

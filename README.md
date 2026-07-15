@@ -121,6 +121,7 @@ migration/schema, áp dụng migration rồi chạy lại `go run ./tools/modelg
 | `PUT` | `/events/{id}` | Cập nhật toàn bộ event |
 | `DELETE` | `/events/{id}` | Xóa event |
 | `POST` | `/tickets/pending` | Giữ một vé trên Redis và gửi yêu cầu pending vào Kafka |
+| `POST` | `/tickets/payment` | Tạo PayPal order và lấy URL thanh toán cho pending ticket |
 | `POST` | `/tickets/confirm` | Xác nhận một pending ticket qua Kafka |
 
 Ví dụ tạo event:
@@ -182,6 +183,30 @@ API ưu tiên đọc pending ticket từ Redis. Nếu không có pending ticket,
 ghi mới nhất tương ứng trong bảng `ticket_done`. Ticket không tồn tại hoặc không
 thuộc `user_id` trả `404 Not Found`.
 
+### Tạo PayPal payment
+
+```bash
+curl -i -X POST http://localhost:8080/tickets/payment \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "user_id": 10,
+    "ticket_id": "c7bca801-a080-45c9-972c-860cd4e44ab6"
+  }'
+```
+
+API chỉ tạo PayPal order khi ticket tồn tại, thuộc user và còn `pending`. Response:
+
+```json
+{
+  "paypal_order_id": "0f676fe2-8fb3-59f8-a40c-d1ac72ca51f5",
+  "payment_url": "https://paypal.local/checkoutnow?token=0f676fe2-8fb3-59f8-a40c-d1ac72ca51f5"
+}
+```
+
+PayPal simulator dùng `ticket_id` làm idempotency key và khóa thao tác tạo order.
+Các request retry hoặc chạy đồng thời cho cùng một pending ticket luôn nhận cùng
+`paypal_order_id` và `payment_url`; không tạo order thứ hai.
+
 ### Confirm ticket
 
 ```bash
@@ -195,7 +220,8 @@ curl -i -X POST http://localhost:8080/tickets/confirm \
 
 API đọc snapshot tại `tickets:{ticket_id}`. Ticket không tồn tại trả `404`; ticket
 không thuộc user trả `403`; ticket không còn `pending` trả `409`. Ticket hợp lệ được
-publish lên Kafka với status `confirm` và API trả `202 Accepted`.
+capture PayPal order đã tạo bởi `/tickets/payment`, sau đó publish lên Kafka với status
+`confirm` và API trả `202 Accepted`. Nếu chưa tạo payment order, API trả `409`.
 
 ## Ticket worker
 

@@ -16,6 +16,7 @@ import (
 	"ticket/service/api/dto"
 	"ticket/shared/kafka"
 	"ticket/shared/model/entity"
+	"ticket/shared/paypal"
 	"ticket/shared/repository"
 )
 
@@ -164,6 +165,39 @@ type fakePublisher struct {
 	calls   int
 }
 
+type fakePaymentProcessor struct {
+	payment          paypal.Payment
+	order            paypal.Order
+	err              error
+	createOrderErr   error
+	calls            int
+	createOrderCalls int
+	checkedTicketID  uuid.UUID
+	checkedUserID    int64
+}
+
+func (processor *fakePaymentProcessor) CreateOrder(
+	_ context.Context,
+	ticketID uuid.UUID,
+	userID int64,
+) (paypal.Order, error) {
+	processor.createOrderCalls++
+	processor.checkedTicketID = ticketID
+	processor.checkedUserID = userID
+	return processor.order, processor.createOrderErr
+}
+
+func (processor *fakePaymentProcessor) Capture(
+	_ context.Context,
+	ticketID uuid.UUID,
+	userID int64,
+) (paypal.Payment, error) {
+	processor.calls++
+	processor.checkedTicketID = ticketID
+	processor.checkedUserID = userID
+	return processor.payment, processor.err
+}
+
 func (publisher *fakePublisher) Publish(_ context.Context, message kafka.UpdatedTicket) error {
 	publisher.calls++
 	publisher.message = message
@@ -188,6 +222,19 @@ func confirmTicketRequest(
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	handler.ConfirmTicket(response, request)
+	return response
+}
+
+func createTicketPaymentRequest(
+	handler *TicketHandler,
+	userID int64,
+	ticketID uuid.UUID,
+) *httptest.ResponseRecorder {
+	body := fmt.Sprintf(`{"user_id":%d,"ticket_id":%q}`, userID, ticketID)
+	request := httptest.NewRequest(http.MethodPost, "/tickets/payment", bytes.NewBufferString(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.CreateTicketPayment(response, request)
 	return response
 }
 
@@ -521,19 +568,183 @@ func TestCreatePendingTicketValidation(t *testing.T) {
 	}
 }
 
+func TestCreateTicketPaymentReturnsPayPalURL(t *testing.T) {
+	ticketID := uuid.New()
+	inventory := &fakeInventory{ticket: entity.Ticket{
+		ID: ticketID, EventID: 20, UserID: 10, ClientOrderID: "order-123", Status: ticketStatusPending,
+	}}
+	payment := &fakePaymentProcessor{order: paypal.Order{
+		ID: "PAYPAL-ORDER-1", ApprovalURL: "https://paypal.local/checkoutnow?token=PAYPAL-ORDER-1",
+	}}
+	handler := NewTicketHandler(inventory, inventory, inventory, &fakePublisher{}, payment)
+
+	response := createTicketPaymentRequest(handler, 10, ticketID)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if payment.createOrderCalls != 1 || payment.checkedTicketID != ticketID || payment.checkedUserID != 10 {
+		t.Fatalf(
+			"create order = calls:%d ticket:%s user:%d",
+			payment.createOrderCalls,
+			payment.checkedTicketID,
+			payment.checkedUserID,
+		)
+	}
+	var result dto.TicketPayment
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.PayPalOrderID != payment.order.ID || result.PaymentURL != payment.order.ApprovalURL {
+		t.Fatalf("payment = %+v", result)
+	}
+}
+
+func TestCreateTicketPaymentIsIdempotent(t *testing.T) {
+	ticketID := uuid.New()
+	inventory := &fakeInventory{ticket: entity.Ticket{
+		ID: ticketID, EventID: 20, UserID: 10, ClientOrderID: "order-123", Status: ticketStatusPending,
+	}}
+	handler := NewTicketHandler(
+		inventory,
+		inventory,
+		inventory,
+		&fakePublisher{},
+		paypal.NewSimulator(),
+	)
+
+	firstResponse := createTicketPaymentRequest(handler, 10, ticketID)
+	secondResponse := createTicketPaymentRequest(handler, 10, ticketID)
+	if firstResponse.Code != http.StatusOK || secondResponse.Code != http.StatusOK {
+		t.Fatalf("statuses = %d, %d", firstResponse.Code, secondResponse.Code)
+	}
+	var first, second dto.TicketPayment
+	if err := json.NewDecoder(firstResponse.Body).Decode(&first); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.NewDecoder(secondResponse.Body).Decode(&second); err != nil {
+		t.Fatal(err)
+	}
+	if first != second || first.PayPalOrderID == "" || first.PaymentURL == "" {
+		t.Fatalf("payments = first:%+v second:%+v", first, second)
+	}
+}
+
+func TestCreateTicketPaymentRejectsNonPendingTicket(t *testing.T) {
+	ticketID := uuid.New()
+	inventory := &fakeInventory{ticket: entity.Ticket{
+		ID: ticketID, UserID: 10, Status: ticketStatusConfirm,
+	}}
+	payment := &fakePaymentProcessor{}
+	handler := NewTicketHandler(inventory, inventory, inventory, &fakePublisher{}, payment)
+
+	response := createTicketPaymentRequest(handler, 10, ticketID)
+
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if payment.createOrderCalls != 0 {
+		t.Fatalf("create order calls = %d", payment.createOrderCalls)
+	}
+}
+
+func TestCreateTicketPaymentRejectsMissingTicketAndAnotherUser(t *testing.T) {
+	ticketID := uuid.New()
+	tests := []struct {
+		name       string
+		inventory  *fakeInventory
+		wantStatus int
+	}{
+		{
+			name:       "missing ticket",
+			inventory:  &fakeInventory{},
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			name: "another user",
+			inventory: &fakeInventory{ticket: entity.Ticket{
+				ID: ticketID, UserID: 11, Status: ticketStatusPending,
+			}},
+			wantStatus: http.StatusForbidden,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			payment := &fakePaymentProcessor{}
+			handler := NewTicketHandler(
+				test.inventory,
+				test.inventory,
+				test.inventory,
+				&fakePublisher{},
+				payment,
+			)
+
+			response := createTicketPaymentRequest(handler, 10, ticketID)
+
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+			}
+			if payment.createOrderCalls != 0 {
+				t.Fatalf("create order calls = %d", payment.createOrderCalls)
+			}
+		})
+	}
+}
+
+func TestCreateTicketPaymentReturnsErrorWhenPayPalFails(t *testing.T) {
+	ticketID := uuid.New()
+	inventory := &fakeInventory{ticket: entity.Ticket{
+		ID: ticketID, UserID: 10, Status: ticketStatusPending,
+	}}
+	payment := &fakePaymentProcessor{createOrderErr: errors.New("paypal unavailable")}
+	handler := NewTicketHandler(inventory, inventory, inventory, &fakePublisher{}, payment)
+
+	response := createTicketPaymentRequest(handler, 10, ticketID)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestCreateTicketPaymentValidation(t *testing.T) {
+	inventory := &fakeInventory{}
+	handler := NewTicketHandler(inventory, inventory, inventory, &fakePublisher{})
+
+	if got := createTicketPaymentRequest(handler, 0, uuid.New()); got.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("invalid user status = %d, body = %s", got.Code, got.Body.String())
+	}
+	if got := createTicketPaymentRequest(handler, 10, uuid.Nil); got.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("missing ticket status = %d, body = %s", got.Code, got.Body.String())
+	}
+}
+
 func TestConfirmTicketPublishesConfirmMessage(t *testing.T) {
 	ticketID := uuid.New()
 	inventory := &fakeInventory{ticket: entity.Ticket{
 		ID: ticketID, EventID: 20, UserID: 10, ClientOrderID: "order-123", Status: ticketStatusPending,
 	}}
 	publisher := &fakePublisher{}
-	response := confirmTicketRequest(NewTicketHandler(inventory, inventory, inventory, publisher), 10, ticketID)
+	payment := &fakePaymentProcessor{}
+	response := confirmTicketRequest(
+		NewTicketHandler(inventory, inventory, inventory, publisher, payment),
+		10,
+		ticketID,
+	)
 
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 	if inventory.getTicketCalls != 1 || inventory.checkedTicketID != ticketID {
 		t.Fatalf("ticket lookup = calls:%d id:%s", inventory.getTicketCalls, inventory.checkedTicketID)
+	}
+	if payment.calls != 1 || payment.checkedTicketID != ticketID || payment.checkedUserID != 10 {
+		t.Fatalf(
+			"payment capture = calls:%d ticket:%s user:%d",
+			payment.calls,
+			payment.checkedTicketID,
+			payment.checkedUserID,
+		)
 	}
 	want := kafka.UpdatedTicket{
 		ID: ticketID, EventID: 20, UserID: 10, ClientOrderID: "order-123", Status: ticketStatusConfirm,
@@ -616,10 +827,58 @@ func TestConfirmTicketReturnsErrorWhenPublishFails(t *testing.T) {
 		ID: ticketID, EventID: 20, UserID: 10, ClientOrderID: "order-123", Status: ticketStatusPending,
 	}}
 	publisher := &fakePublisher{err: errors.New("kafka unavailable")}
-	response := confirmTicketRequest(NewTicketHandler(inventory, inventory, inventory, publisher), 10, ticketID)
+	response := confirmTicketRequest(
+		NewTicketHandler(inventory, inventory, inventory, publisher, &fakePaymentProcessor{}),
+		10,
+		ticketID,
+	)
 
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestConfirmTicketDoesNotPublishWhenPaymentFails(t *testing.T) {
+	ticketID := uuid.New()
+	inventory := &fakeInventory{ticket: entity.Ticket{
+		ID: ticketID, EventID: 20, UserID: 10, ClientOrderID: "order-123", Status: ticketStatusPending,
+	}}
+	publisher := &fakePublisher{}
+	payment := &fakePaymentProcessor{err: errors.New("paypal unavailable")}
+	response := confirmTicketRequest(
+		NewTicketHandler(inventory, inventory, inventory, publisher, payment),
+		10,
+		ticketID,
+	)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if payment.calls != 1 {
+		t.Fatalf("payment calls = %d", payment.calls)
+	}
+	if publisher.calls != 0 {
+		t.Fatalf("publish calls = %d", publisher.calls)
+	}
+}
+
+func TestConfirmTicketRequiresPaymentOrder(t *testing.T) {
+	ticketID := uuid.New()
+	inventory := &fakeInventory{ticket: entity.Ticket{
+		ID: ticketID, EventID: 20, UserID: 10, ClientOrderID: "order-123", Status: ticketStatusPending,
+	}}
+	publisher := &fakePublisher{}
+	response := confirmTicketRequest(
+		NewTicketHandler(inventory, inventory, inventory, publisher, paypal.NewSimulator()),
+		10,
+		ticketID,
+	)
+
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if publisher.calls != 0 {
+		t.Fatalf("publish calls = %d", publisher.calls)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"ticket/service/api/validation"
 	"ticket/shared/kafka"
 	"ticket/shared/model/entity"
+	"ticket/shared/paypal"
 	"ticket/shared/repository"
 )
 
@@ -27,6 +28,7 @@ type TicketHandler struct {
 	ticketStore repository.TicketRepository
 	eventCache  EventCache
 	publisher   TicketPublisher
+	payment     PaymentProcessor
 }
 
 type TicketCache interface {
@@ -43,17 +45,28 @@ type TicketPublisher interface {
 	Publish(ctx context.Context, ticket kafka.UpdatedTicket) error
 }
 
+type PaymentProcessor interface {
+	CreateOrder(ctx context.Context, ticketID uuid.UUID, userID int64) (paypal.Order, error)
+	Capture(ctx context.Context, ticketID uuid.UUID, userID int64) (paypal.Payment, error)
+}
+
 func NewTicketHandler(
 	ticketCache TicketCache,
 	ticketStore repository.TicketRepository,
 	eventCache EventCache,
 	publisher TicketPublisher,
+	payments ...PaymentProcessor,
 ) *TicketHandler {
+	payment := PaymentProcessor(paypal.NewSimulator())
+	if len(payments) > 0 && payments[0] != nil {
+		payment = payments[0]
+	}
 	return &TicketHandler{
 		ticketCache: ticketCache,
 		ticketStore: ticketStore,
 		eventCache:  eventCache,
 		publisher:   publisher,
+		payment:     payment,
 	}
 }
 
@@ -173,21 +186,21 @@ func (handler *TicketHandler) ConfirmTicket(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	ticket, err := handler.ticketCache.GetTicketByID(r.Context(), input.TicketID)
+	ticket, err := handler.pendingTicketForUser(r.Context(), input.UserID, input.TicketID)
 	if err != nil {
 		apierror.Write(w, err)
 		return
 	}
-	if ticket.ID == uuid.Nil {
-		apierror.Write(w, apierror.New(http.StatusNotFound, "ticket not found"))
-		return
-	}
-	if ticket.Status != ticketStatusPending {
-		apierror.Write(w, apierror.New(http.StatusConflict, "ticket is not pending"))
-		return
-	}
-	if ticket.UserID != input.UserID {
-		apierror.Write(w, apierror.New(http.StatusForbidden, "ticket does not belong to user"))
+	if _, err := handler.payment.Capture(r.Context(), ticket.ID, ticket.UserID); err != nil {
+		if errors.Is(err, paypal.ErrOrderNotFound) {
+			apierror.Write(w, apierror.Wrap(
+				http.StatusConflict,
+				"payment order not found",
+				err,
+			))
+			return
+		}
+		apierror.Write(w, err)
 		return
 	}
 
@@ -204,6 +217,51 @@ func (handler *TicketHandler) ConfirmTicket(w http.ResponseWriter, r *http.Reque
 	}
 
 	apiresponse.Write(w, http.StatusAccepted, dto.PendingTicket{TicketID: ticket.ID})
+}
+
+func (handler *TicketHandler) CreateTicketPayment(w http.ResponseWriter, r *http.Request) {
+	input, err := validation.ValidateCreateTicketPayment(r)
+	if err != nil {
+		apierror.Write(w, err)
+		return
+	}
+
+	ticket, err := handler.pendingTicketForUser(r.Context(), input.UserID, input.TicketID)
+	if err != nil {
+		apierror.Write(w, err)
+		return
+	}
+	order, err := handler.payment.CreateOrder(r.Context(), ticket.ID, ticket.UserID)
+	if err != nil {
+		apierror.Write(w, err)
+		return
+	}
+
+	apiresponse.Write(w, http.StatusOK, dto.TicketPayment{
+		PayPalOrderID: order.ID,
+		PaymentURL:    order.ApprovalURL,
+	})
+}
+
+func (handler *TicketHandler) pendingTicketForUser(
+	ctx context.Context,
+	userID int64,
+	ticketID uuid.UUID,
+) (entity.Ticket, error) {
+	ticket, err := handler.ticketCache.GetTicketByID(ctx, ticketID)
+	if err != nil {
+		return entity.Ticket{}, err
+	}
+	if ticket.ID == uuid.Nil {
+		return entity.Ticket{}, apierror.New(http.StatusNotFound, "ticket not found")
+	}
+	if ticket.Status != ticketStatusPending {
+		return entity.Ticket{}, apierror.New(http.StatusConflict, "ticket is not pending")
+	}
+	if ticket.UserID != userID {
+		return entity.Ticket{}, apierror.New(http.StatusForbidden, "ticket does not belong to user")
+	}
+	return ticket, nil
 }
 
 func ticketDTO(ticket entity.Ticket) dto.Ticket {

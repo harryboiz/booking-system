@@ -13,6 +13,7 @@ import (
 	sharedconfig "ticket/shared/config"
 	"ticket/shared/database"
 	"ticket/shared/kafka"
+	"ticket/shared/paypal"
 	"ticket/shared/redis"
 	repositoryimpl "ticket/shared/repository/impl"
 )
@@ -58,8 +59,15 @@ func main() {
 
 	eventStore := repositoryimpl.NewEventRepository(db)
 	ticketStore := repositoryimpl.NewTicketRepository(db)
+	paymentSimulator := paypal.NewSimulator()
 	eventHandler := handler.NewEventHandler(eventStore)
-	ticketHandler := handler.NewTicketHandler(ticketCache, ticketStore, eventCache, publisher)
+	ticketHandler := handler.NewTicketHandler(
+		ticketCache,
+		ticketStore,
+		eventCache,
+		publisher,
+		paymentSimulator,
+	)
 	server := &http.Server{
 		Addr:              apiConfig.Server.Address,
 		Handler:           api.NewHandler(eventHandler, ticketHandler),
