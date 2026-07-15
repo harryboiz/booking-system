@@ -197,6 +197,82 @@ func TestSimulatorTicketCaptureAdapterChecksPayerAndOrder(t *testing.T) {
 	}
 }
 
+func TestSimulatorRefundCapturedPaymentReturnsPayPalRefund(t *testing.T) {
+	ticketID := uuid.New()
+	simulator := NewSimulator()
+	created, err := simulator.CreateOrder(context.Background(), createOrderRequest(ticketID, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	captured, err := simulator.CaptureOrder(context.Background(), CaptureOrderRequest{
+		OrderID: created.Order.ID, PayPalRequestID: "capture-" + ticketID.String(), Prefer: PreferRepresentation,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	captureID := captured.Order.PurchaseUnits[0].Payments.Captures[0].ID
+	request := RefundCapturedPaymentRequest{
+		CaptureID: captureID, PayPalRequestID: "refund-" + ticketID.String(), Prefer: PreferRepresentation,
+		Body: RefundRequest{InvoiceID: ticketID.String(), NoteToPayer: "Ticket order cancelled"},
+	}
+
+	first, err := simulator.RefundCapturedPayment(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := simulator.RefundCapturedPayment(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.StatusCode != http.StatusCreated || second.StatusCode != http.StatusOK ||
+		!reflect.DeepEqual(first.Refund, second.Refund) {
+		t.Fatalf("first = %+v, second = %+v", first, second)
+	}
+	if first.Refund.ID == "" || first.Refund.Status != RefundStatusCompleted ||
+		first.Refund.Amount != (Money{CurrencyCode: "USD", Value: "49.50"}) || len(first.Refund.Links) != 2 {
+		t.Fatalf("refund = %+v", first.Refund)
+	}
+
+	request.PayPalRequestID = "another-refund-request"
+	if _, err := simulator.RefundCapturedPayment(context.Background(), request); !errors.Is(err, ErrCaptureFullyRefunded) {
+		t.Fatalf("error = %v, want %v", err, ErrCaptureFullyRefunded)
+	}
+	createRequest := createOrderRequest(ticketID, 10)
+	createRequest.Prefer = PreferRepresentation
+	order, err := simulator.CreateOrder(context.Background(), createRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := order.Order.PurchaseUnits[0].Payments.Captures[0].Status
+	if status != CaptureStatusRefunded {
+		t.Fatalf("capture status = %q", status)
+	}
+}
+
+func TestSimulatorRefundTicketSkipsUncapturedAndRefundsCapturedOrder(t *testing.T) {
+	ticketID := uuid.New()
+	simulator := NewSimulator()
+	if _, err := simulator.CreateOrder(context.Background(), createOrderRequest(ticketID, 10)); err != nil {
+		t.Fatal(err)
+	}
+
+	refunded, err := simulator.RefundTicket(context.Background(), ticketID, 10)
+	if err != nil || refunded {
+		t.Fatalf("uncaptured refund = %v, error = %v", refunded, err)
+	}
+	if _, err := simulator.Capture(context.Background(), ticketID, 10); err != nil {
+		t.Fatal(err)
+	}
+	refunded, err = simulator.RefundTicket(context.Background(), ticketID, 10)
+	if err != nil || !refunded {
+		t.Fatalf("captured refund = %v, error = %v", refunded, err)
+	}
+	refunded, err = simulator.RefundTicket(context.Background(), ticketID, 10)
+	if err != nil || !refunded {
+		t.Fatalf("idempotent refund = %v, error = %v", refunded, err)
+	}
+}
+
 func TestSimulatorValidatesPayPalCreateOrderRequest(t *testing.T) {
 	simulator := NewSimulator()
 	request := createOrderRequest(uuid.New(), 10)

@@ -278,9 +278,13 @@ chế at-least-once.
 Cancellation service là process độc lập với worker. Service chạy một lượt ngay khi
 khởi động, sau đó mỗi `poll_interval` (local là 1 phút) poll toàn bộ bảng `tickets`,
 không lọc theo `message_key`. Các ticket `pending` đã được tạo từ 20 phút trở lên
-được publish lên Kafka với status `cancel`; worker consumer thực hiện việc chuyển
-trạng thái. Mỗi lượt query tối đa `batch_size`; duplicate message vẫn an toàn nhờ
-xử lý idempotent ở worker.
+được kiểm tra payment trước khi publish Kafka status `cancel`. Nếu PayPal order đã
+capture, service gọi full refund theo capture ID; ticket chưa capture không cần refund.
+Refund dùng `PayPal-Request-Id` sinh từ ticket ID nên retry không hoàn tiền hai lần.
+Nếu refund lỗi, ticket đó chưa được publish `cancel` và sẽ được retry ở lượt poll sau;
+lỗi của một ticket không chặn các ticket khác. Worker consumer thực hiện việc chuyển
+trạng thái. Mỗi lượt query tối đa `batch_size`; duplicate message vẫn an toàn nhờ xử
+lý idempotent ở worker.
 
 ## Test
 

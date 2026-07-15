@@ -13,6 +13,7 @@ import (
 	sharedconfig "ticket/shared/config"
 	"ticket/shared/database"
 	sharedkafka "ticket/shared/kafka"
+	"ticket/shared/paypal"
 	repositoryimpl "ticket/shared/repository/impl"
 )
 
@@ -47,7 +48,7 @@ func main() {
 	}()
 
 	cancelExpiredTicket := cronjob.NewCancelExpiredTicket(
-		repositoryimpl.NewTicketRepository(db), publisher, cancelAfter,
+		repositoryimpl.NewTicketRepository(db), publisher, paypal.NewSimulator(), cancelAfter,
 		pollInterval, cfg.Settings.BatchSize, slog.Default(),
 	)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

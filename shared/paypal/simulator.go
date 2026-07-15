@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"reflect"
 	"regexp"
@@ -26,6 +27,8 @@ var (
 	ErrIdempotencyConflict  = errors.New("paypal: idempotency key reused with a different request")
 	ErrOrderNotFound        = errors.New("paypal: order not found")
 	ErrOrderAlreadyCaptured = errors.New("paypal: order already captured")
+	ErrCaptureNotFound      = errors.New("paypal: capture not found")
+	ErrCaptureFullyRefunded = errors.New("paypal: capture fully refunded")
 	ErrPayerMismatch        = errors.New("paypal: payment belongs to another user")
 	moneyPattern            = regexp.MustCompile(`^[0-9]+(?:\.[0-9]{1,2})?$`)
 	orderIDPattern          = regexp.MustCompile(`^[A-Z0-9]{1,36}$`)
@@ -38,6 +41,7 @@ type Simulator struct {
 	mu                 sync.Mutex
 	orders             map[string]*orderState
 	orderIDByRequestID map[string]string
+	refundsByCaptureID map[string]*captureRefundState
 	now                func() time.Time
 }
 
@@ -48,10 +52,16 @@ type orderState struct {
 	captureResult    *CaptureOrderResponse
 }
 
+type captureRefundState struct {
+	refundedMinorUnits   int64
+	responsesByRequestID map[string]RefundCapturedPaymentResponse
+}
+
 func NewSimulator() *Simulator {
 	return &Simulator{
 		orders:             make(map[string]*orderState),
 		orderIDByRequestID: make(map[string]string),
+		refundsByCaptureID: make(map[string]*captureRefundState),
 		now:                time.Now,
 	}
 }
@@ -216,6 +226,139 @@ func (simulator *Simulator) Capture(
 	})
 }
 
+// RefundCapturedPayment simulates
+// POST /v2/payments/captures/{capture_id}/refund. An empty body refunds the
+// remaining captured amount in full. PayPal-Request-Id makes retries
+// idempotent, returning 201 initially and 200 on replay.
+func (simulator *Simulator) RefundCapturedPayment(
+	ctx context.Context,
+	request RefundCapturedPaymentRequest,
+) (RefundCapturedPaymentResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return RefundCapturedPaymentResponse{}, fmt.Errorf("paypal: refund capture: %w", err)
+	}
+	if !orderIDPattern.MatchString(request.CaptureID) || request.PayPalRequestID == "" ||
+		len(request.PayPalRequestID) > 10000 || !validPrefer(request.Prefer) {
+		return RefundCapturedPaymentResponse{}, fmt.Errorf("%w: refund capture path or headers are invalid", ErrInvalidRequest)
+	}
+
+	simulator.mu.Lock()
+	defer simulator.mu.Unlock()
+
+	orderState, purchaseUnitIndex, captureIndex, capture := simulator.findCapture(request.CaptureID)
+	if orderState == nil {
+		return RefundCapturedPaymentResponse{}, ErrCaptureNotFound
+	}
+	refundState := simulator.refundsByCaptureID[request.CaptureID]
+	if refundState == nil {
+		refundState = &captureRefundState{responsesByRequestID: make(map[string]RefundCapturedPaymentResponse)}
+		simulator.refundsByCaptureID[request.CaptureID] = refundState
+	}
+	if existing, ok := refundState.responsesByRequestID[request.PayPalRequestID]; ok {
+		existing.StatusCode = http.StatusOK
+		existing.Refund = cloneRefund(existing.Refund)
+		return existing, nil
+	}
+
+	capturedMinorUnits, err := moneyMinorUnits(capture.Amount)
+	if err != nil {
+		return RefundCapturedPaymentResponse{}, err
+	}
+	remainingMinorUnits := capturedMinorUnits - refundState.refundedMinorUnits
+	if remainingMinorUnits <= 0 {
+		return RefundCapturedPaymentResponse{}, ErrCaptureFullyRefunded
+	}
+	refundAmount := capture.Amount
+	refundMinorUnits := remainingMinorUnits
+	if request.Body.Amount != nil {
+		if request.Body.Amount.CurrencyCode != capture.Amount.CurrencyCode {
+			return RefundCapturedPaymentResponse{}, fmt.Errorf("%w: refund currency must match capture currency", ErrInvalidRequest)
+		}
+		refundMinorUnits, err = moneyMinorUnits(*request.Body.Amount)
+		if err != nil || refundMinorUnits > remainingMinorUnits {
+			return RefundCapturedPaymentResponse{}, fmt.Errorf("%w: refund amount exceeds remaining capture amount", ErrInvalidRequest)
+		}
+		refundAmount = *request.Body.Amount
+	} else {
+		refundAmount.Value = minorUnitsValue(remainingMinorUnits)
+	}
+
+	now := simulator.now().UTC()
+	refundID := paypalID("refund:" + request.CaptureID + ":" + request.PayPalRequestID)
+	refundURL := sandboxAPIBaseURL + "/v2/payments/refunds/" + refundID
+	refund := Refund{
+		ID: refundID, Status: RefundStatusCompleted, Amount: refundAmount,
+		InvoiceID: request.Body.InvoiceID, CustomID: request.Body.CustomID,
+		CreateTime: now, UpdateTime: now,
+		Links: []Link{
+			{Href: refundURL, Rel: "self", Method: http.MethodGet},
+			{Href: sandboxAPIBaseURL + "/v2/payments/captures/" + request.CaptureID, Rel: "up", Method: http.MethodGet},
+		},
+	}
+	refundState.refundedMinorUnits += refundMinorUnits
+	if refundState.refundedMinorUnits == capturedMinorUnits {
+		capture.Status = CaptureStatusRefunded
+	} else {
+		capture.Status = "PARTIALLY_REFUNDED"
+	}
+	orderState.order.PurchaseUnits[purchaseUnitIndex].Payments.Captures[captureIndex] = capture
+	if orderState.captureResult != nil {
+		orderState.captureResult.Order = cloneOrder(orderState.order)
+	}
+	response := RefundCapturedPaymentResponse{StatusCode: http.StatusCreated, Refund: refund}
+	refundState.responsesByRequestID[request.PayPalRequestID] = response
+	response.Refund = cloneRefund(response.Refund)
+	return response, nil
+}
+
+// RefundTicket is the cancellation-job adapter. A ticket without a completed
+// capture needs no refund and returns false without error.
+func (simulator *Simulator) RefundTicket(
+	ctx context.Context,
+	ticketID uuid.UUID,
+	userID int64,
+) (bool, error) {
+	if ticketID == uuid.Nil || userID <= 0 {
+		return false, fmt.Errorf("%w: valid ticket and user IDs are required", ErrInvalidRequest)
+	}
+
+	simulator.mu.Lock()
+	orderID, ok := simulator.orderIDByRequestID[ticketID.String()]
+	if !ok {
+		simulator.mu.Unlock()
+		return false, nil
+	}
+	state := simulator.orders[orderID]
+	if len(state.request.Body.PurchaseUnits) == 0 ||
+		state.request.Body.PurchaseUnits[0].CustomID != strconv.FormatInt(userID, 10) {
+		simulator.mu.Unlock()
+		return false, ErrPayerMismatch
+	}
+	var captureID string
+	for _, unit := range state.order.PurchaseUnits {
+		if unit.Payments != nil && len(unit.Payments.Captures) > 0 {
+			captureID = unit.Payments.Captures[0].ID
+			break
+		}
+	}
+	simulator.mu.Unlock()
+	if captureID == "" {
+		return false, nil
+	}
+
+	_, err := simulator.RefundCapturedPayment(ctx, RefundCapturedPaymentRequest{
+		CaptureID: captureID, PayPalRequestID: "refund-" + ticketID.String(), Prefer: PreferRepresentation,
+		Body: RefundRequest{
+			InvoiceID: ticketID.String(), CustomID: strconv.FormatInt(userID, 10),
+			NoteToPayer: "Ticket order cancelled",
+		},
+	})
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func validateCreateOrderRequest(ctx context.Context, request CreateOrderRequest) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("paypal: create order: %w", err)
@@ -312,5 +455,45 @@ func cloneOrder(order Order) Order {
 		updateTime := *order.UpdateTime
 		result.UpdateTime = &updateTime
 	}
+	return result
+}
+
+func (simulator *Simulator) findCapture(
+	captureID string,
+) (*orderState, int, int, Capture) {
+	for _, state := range simulator.orders {
+		for purchaseUnitIndex := range state.order.PurchaseUnits {
+			payments := state.order.PurchaseUnits[purchaseUnitIndex].Payments
+			if payments == nil {
+				continue
+			}
+			for captureIndex, capture := range payments.Captures {
+				if capture.ID == captureID {
+					return state, purchaseUnitIndex, captureIndex, capture
+				}
+			}
+		}
+	}
+	return nil, 0, 0, Capture{}
+}
+
+func moneyMinorUnits(amount Money) (int64, error) {
+	if !moneyPattern.MatchString(amount.Value) {
+		return 0, fmt.Errorf("%w: money value is invalid", ErrInvalidRequest)
+	}
+	value, err := strconv.ParseFloat(amount.Value, 64)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("%w: money value must be positive", ErrInvalidRequest)
+	}
+	return int64(math.Round(value * 100)), nil
+}
+
+func minorUnitsValue(value int64) string {
+	return fmt.Sprintf("%d.%02d", value/100, value%100)
+}
+
+func cloneRefund(refund Refund) Refund {
+	result := refund
+	result.Links = append([]Link(nil), refund.Links...)
 	return result
 }

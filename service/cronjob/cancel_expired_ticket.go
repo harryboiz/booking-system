@@ -3,8 +3,11 @@ package cronjob
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/google/uuid"
 
 	sharedkafka "ticket/shared/kafka"
 	"ticket/shared/repository"
@@ -16,11 +19,17 @@ type Publisher interface {
 	Publish(context.Context, sharedkafka.UpdatedTicket) error
 }
 
-// CancelExpiredTicket periodically publishes cancellation requests for every pending ticket
-// that has exceeded its confirmation window.
+type RefundProcessor interface {
+	RefundTicket(context.Context, uuid.UUID, int64) (bool, error)
+}
+
+// CancelExpiredTicket refunds captured PayPal payments and publishes
+// cancellation requests for pending tickets that exceeded their confirmation
+// window.
 type CancelExpiredTicket struct {
 	repository   repository.TicketRepository
 	publisher    Publisher
+	refunder     RefundProcessor
 	cancelAfter  time.Duration
 	pollInterval time.Duration
 	batchSize    int
@@ -31,6 +40,7 @@ type CancelExpiredTicket struct {
 func NewCancelExpiredTicket(
 	repository repository.TicketRepository,
 	publisher Publisher,
+	refunder RefundProcessor,
 	cancelAfter time.Duration,
 	pollInterval time.Duration,
 	batchSize int,
@@ -40,7 +50,7 @@ func NewCancelExpiredTicket(
 		logger = slog.Default()
 	}
 	return &CancelExpiredTicket{
-		repository: repository, publisher: publisher,
+		repository: repository, publisher: publisher, refunder: refunder,
 		cancelAfter: cancelAfter, pollInterval: pollInterval,
 		batchSize: batchSize, logger: logger, now: time.Now,
 	}
@@ -64,7 +74,7 @@ func (job *CancelExpiredTicket) pollAndLog(ctx context.Context) {
 	count, err := job.poll(ctx)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-			job.logger.Error("cannot publish expired ticket cancellations", "error", err)
+			job.logger.Error("cannot refund or publish expired ticket cancellations", "error", err)
 		}
 		return
 	}
@@ -81,17 +91,27 @@ func (job *CancelExpiredTicket) poll(ctx context.Context) (int, error) {
 	}
 
 	published := 0
-	var publishErrors []error
+	var processingErrors []error
 	for _, ticket := range tickets {
+		if _, err := job.refunder.RefundTicket(ctx, ticket.ID, ticket.UserID); err != nil {
+			processingErrors = append(
+				processingErrors,
+				fmt.Errorf("refund ticket %s: %w", ticket.ID, err),
+			)
+			continue
+		}
 		message := sharedkafka.UpdatedTicket{
 			ID: ticket.ID, UserID: ticket.UserID, EventID: ticket.EventID,
 			ClientOrderID: ticket.ClientOrderID, Status: statusCancel,
 		}
 		if err := job.publisher.Publish(ctx, message); err != nil {
-			publishErrors = append(publishErrors, err)
+			processingErrors = append(
+				processingErrors,
+				fmt.Errorf("publish cancellation for ticket %s: %w", ticket.ID, err),
+			)
 			continue
 		}
 		published++
 	}
-	return published, errors.Join(publishErrors...)
+	return published, errors.Join(processingErrors...)
 }

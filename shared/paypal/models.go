@@ -6,8 +6,10 @@ const (
 	IntentCapture   = "CAPTURE"
 	IntentAuthorize = "AUTHORIZE"
 
-	OrderStatusCreated   = "CREATED"
-	OrderStatusCompleted = "COMPLETED"
+	OrderStatusCreated    = "CREATED"
+	OrderStatusCompleted  = "COMPLETED"
+	CaptureStatusRefunded = "REFUNDED"
+	RefundStatusCompleted = "COMPLETED"
 
 	PreferMinimal        = "return=minimal"
 	PreferRepresentation = "return=representation"
@@ -140,4 +142,37 @@ type CaptureOrderRequest struct {
 type CaptureOrderResponse struct {
 	StatusCode int   `json:"-"`
 	Order      Order `json:"-"`
+}
+
+// RefundCapturedPaymentRequest represents
+// POST /v2/payments/captures/{capture_id}/refund. A nil Amount is an empty
+// request body and requests a full refund, matching PayPal Payments v2.
+type RefundCapturedPaymentRequest struct {
+	CaptureID       string        `json:"-"`
+	PayPalRequestID string        `json:"-"`
+	Prefer          string        `json:"-"`
+	Body            RefundRequest `json:"-"`
+}
+
+type RefundRequest struct {
+	Amount      *Money `json:"amount,omitempty"`
+	InvoiceID   string `json:"invoice_id,omitempty"`
+	CustomID    string `json:"custom_id,omitempty"`
+	NoteToPayer string `json:"note_to_payer,omitempty"`
+}
+
+type Refund struct {
+	ID         string    `json:"id"`
+	Status     string    `json:"status"`
+	Amount     Money     `json:"amount"`
+	InvoiceID  string    `json:"invoice_id,omitempty"`
+	CustomID   string    `json:"custom_id,omitempty"`
+	CreateTime time.Time `json:"create_time"`
+	UpdateTime time.Time `json:"update_time"`
+	Links      []Link    `json:"links"`
+}
+
+type RefundCapturedPaymentResponse struct {
+	StatusCode int    `json:"-"`
+	Refund     Refund `json:"-"`
 }
