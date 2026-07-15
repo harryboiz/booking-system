@@ -6,10 +6,17 @@ The ticket update consumer is the authoritative processor for asynchronous ticke
 state changes. It consumes `pending`, `confirm`, and `cancel` commands, persists a
 batch transactionally, refreshes Redis projections, and then commits Kafka offsets.
 
-Start it with:
+Start the first local consumer, which owns message keys `0` through `49`, with:
 
 ```bash
 go run ./cmd/update_ticket_consumer
+```
+
+Start the second local consumer, which owns message keys `50` through `99`, in
+another terminal:
+
+```bash
+WORKER_MESSAGE_KEYS="50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99" go run ./cmd/update_ticket_consumer
 ```
 
 ## Startup reconciliation
@@ -65,9 +72,12 @@ order is preserved within that event shard.
 
 ## Local shard ownership
 
-The local configuration owns message keys `0` through `9`. Consequently, it only
-processes events whose ID modulo 100 falls in that range. To cover every event with
-one local consumer, set:
+The default local configuration assigns message keys `0` through `49` to the first
+consumer. The second local consumer uses `WORKER_MESSAGE_KEYS` to own keys `50`
+through `99`, as shown above. Together they cover every event shard without
+overlapping ownership.
+
+To cover every event with one local consumer instead, set:
 
 ```bash
 export WORKER_MESSAGE_KEYS="0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99"
