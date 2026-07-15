@@ -1,4 +1,4 @@
-package worker
+package kafkaprocessor
 
 import (
 	"context"
@@ -32,7 +32,7 @@ type TicketCache interface {
 	SetTicket(context.Context, []entity.Ticket, []entity.TicketDone) error
 }
 
-type Processor struct {
+type UpdateTicket struct {
 	eventRepository  repository.EventRepository
 	ticketRepository repository.TicketRepository
 	eventCache       EventCache
@@ -46,18 +46,18 @@ type decodedMessage struct {
 	ticket sharedkafka.UpdatedTicket
 }
 
-func NewProcessor(
+func NewUpdateTicket(
 	eventRepository repository.EventRepository,
 	ticketRepository repository.TicketRepository,
 	eventCache EventCache,
 	ticketCache TicketCache,
 	cancelAfter time.Duration,
 	logger *slog.Logger,
-) *Processor {
+) *UpdateTicket {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Processor{
+	return &UpdateTicket{
 		eventRepository: eventRepository, ticketRepository: ticketRepository,
 		eventCache: eventCache, ticketCache: ticketCache,
 		cancelAfter: cancelAfter, logger: logger,
@@ -65,7 +65,7 @@ func NewProcessor(
 }
 
 // Reconcile refreshes Redis snapshots for this worker's shards from PostgreSQL.
-func (processor *Processor) Reconcile(ctx context.Context, messageKeys []int) error {
+func (processor *UpdateTicket) Reconcile(ctx context.Context, messageKeys []int) error {
 	events, err := processor.eventRepository.FindEventsByMessageKeys(
 		ctx, messageKeys, int(sharedkafka.MessageKeyCount),
 	)
@@ -89,7 +89,7 @@ func (processor *Processor) Reconcile(ctx context.Context, messageKeys []int) er
 	return nil
 }
 
-func (processor *Processor) Process(ctx context.Context, records []kafkago.Message) error {
+func (processor *UpdateTicket) Process(ctx context.Context, records []kafkago.Message) error {
 	decoded := processor.decode(records)
 	if len(decoded) == 0 {
 		return nil
@@ -223,7 +223,7 @@ func completedTicket(ticket *entity.Ticket, status string, now time.Time) entity
 	}
 }
 
-func (processor *Processor) decode(records []kafkago.Message) []decodedMessage {
+func (processor *UpdateTicket) decode(records []kafkago.Message) []decodedMessage {
 	result := make([]decodedMessage, 0, len(records))
 	for _, record := range records {
 		var ticket sharedkafka.UpdatedTicket
@@ -247,14 +247,14 @@ func (processor *Processor) decode(records []kafkago.Message) []decodedMessage {
 	return result
 }
 
-func (processor *Processor) updateEventCache(ctx context.Context, events []entity.Event) {
+func (processor *UpdateTicket) updateEventCache(ctx context.Context, events []entity.Event) {
 	if err := processor.eventCache.SetEvents(ctx, events); err != nil {
 		// PostgreSQL is the source of truth. A later batch or startup reconciliation repairs Redis.
 		processor.logger.Warn("cannot update events in redis", "error", err)
 	}
 }
 
-func (processor *Processor) updateTicketCache(
+func (processor *UpdateTicket) updateTicketCache(
 	ctx context.Context,
 	pendingOrders []entity.Ticket,
 	doneOrders []entity.TicketDone,

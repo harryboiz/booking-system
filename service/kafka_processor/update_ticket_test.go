@@ -1,4 +1,4 @@
-package worker
+package kafkaprocessor
 
 import (
 	"context"
@@ -16,7 +16,7 @@ import (
 )
 
 func TestDecodeOnlyAcceptsMessageOnItsConfiguredShard(t *testing.T) {
-	processor := &Processor{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	processor := &UpdateTicket{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	ticket := sharedkafka.UpdatedTicket{
 		ID: uuid.New(), EventID: 101, UserID: 2, ClientOrderID: "order-1", Status: statusPending,
 	}
@@ -38,16 +38,16 @@ func TestDecodeOnlyAcceptsMessageOnItsConfiguredShard(t *testing.T) {
 
 func TestCanCancelPendingTicketOnlyAfterTimeout(t *testing.T) {
 	now := time.Now().UTC()
-	ticket := &entity.Ticket{EventID: 10, Status: statusPending, CreatedAt: now.Add(-16 * time.Minute)}
-	if !canCancel(ticket, 10, now, 15*time.Minute) {
+	ticket := &entity.Ticket{EventID: 10, Status: statusPending, CreatedAt: now.Add(-21 * time.Minute)}
+	if !canCancel(ticket, 10, now, 20*time.Minute) {
 		t.Fatal("old pending ticket should be cancellable")
 	}
-	ticket.CreatedAt = now.Add(-15 * time.Minute)
-	if canCancel(ticket, 10, now, 15*time.Minute) {
-		t.Fatal("ticket must be older than 15 minutes")
+	ticket.CreatedAt = now.Add(-20 * time.Minute)
+	if canCancel(ticket, 10, now, 20*time.Minute) {
+		t.Fatal("ticket must be older than 20 minutes")
 	}
-	ticket.CreatedAt = now.Add(-16 * time.Minute)
-	if canCancel(ticket, 11, now, 15*time.Minute) {
+	ticket.CreatedAt = now.Add(-21 * time.Minute)
+	if canCancel(ticket, 11, now, 20*time.Minute) {
 		t.Fatal("ticket from another event must not be cancelled")
 	}
 }
@@ -61,7 +61,7 @@ func TestReconcileCachesTicketsForWorkerEvents(t *testing.T) {
 		done:    []entity.TicketDone{{ID: doneID, EventID: 101, UserID: 11, ClientOrderID: "done-1"}},
 	}
 	cache := &reconcileCache{}
-	processor := NewProcessor(repository, repository, cache, cache, 15*time.Minute, nil)
+	processor := NewUpdateTicket(repository, repository, cache, cache, 15*time.Minute, nil)
 
 	if err := processor.Reconcile(context.Background(), []int{1}); err != nil {
 		t.Fatal(err)

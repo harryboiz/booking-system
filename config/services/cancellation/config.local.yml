@@ -1,0 +1,8 @@
+cancellation:
+  batch_size: 10000
+  poll_interval: 1m
+  cancel_after: 20m
+
+includes:
+  - ../../shared/postgres/config.local.yml
+  - ../../shared/kafka/config.local.yml

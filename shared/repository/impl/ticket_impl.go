@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -23,8 +24,13 @@ type TicketRepositoryImpl struct {
 }
 
 var _ repository.TicketRepository = (*TicketRepositoryImpl)(nil)
+var _ repository.ExpiredTicketRepository = (*TicketRepositoryImpl)(nil)
 
 func NewTicketRepository(db *gorm.DB) repository.TicketRepository {
+	return &TicketRepositoryImpl{db: db}
+}
+
+func NewExpiredTicketRepository(db *gorm.DB) repository.ExpiredTicketRepository {
 	return &TicketRepositoryImpl{db: db}
 }
 
@@ -119,6 +125,25 @@ func (impl *TicketRepositoryImpl) FindDoneTicketsByIDs(
 	var tickets []entity.TicketDone
 	if err := impl.db.WithContext(ctx).Where("id IN ?", ticketIDs).Find(&tickets).Error; err != nil {
 		return nil, fmt.Errorf("load completed tickets: %w", err)
+	}
+	return tickets, nil
+}
+
+func (impl *TicketRepositoryImpl) FindExpiredPendingTickets(
+	ctx context.Context,
+	createdBefore time.Time,
+	limit int,
+) ([]entity.Ticket, error) {
+	if limit <= 0 {
+		return []entity.Ticket{}, nil
+	}
+	var tickets []entity.Ticket
+	if err := impl.db.WithContext(ctx).
+		Where("status = ? AND created_at <= ?", pendingTicketStatus, createdBefore).
+		Order("created_at, id").
+		Limit(limit).
+		Find(&tickets).Error; err != nil {
+		return nil, fmt.Errorf("load expired pending tickets: %w", err)
 	}
 	return tickets, nil
 }

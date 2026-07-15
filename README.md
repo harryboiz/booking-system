@@ -24,6 +24,13 @@ export DATABASE_URL='postgres://ticket:ticket@localhost:5432/ticket?sslmode=disa
 go run ./cmd/worker
 ```
 
+Chạy cancellation service ở terminal riêng:
+
+```bash
+export DATABASE_URL='postgres://ticket:ticket@localhost:5432/ticket?sslmode=disable'
+go run ./cmd/cancellation
+```
+
 ## Configuration
 
 `shared/config` load riêng từng file YAML:
@@ -34,6 +41,8 @@ go run ./cmd/worker
 - `config/shared/kafka/config.local.yml`: Kafka brokers và topic `ticket`.
 - `config/services/worker/config.local.yml`: consumer group, message key/partition,
   batch tối đa 10.000 message, thời gian gom batch và timeout cancel.
+- `config/services/cancellation/config.local.yml`: batch poll, chu kỳ poll và thời
+  gian chờ trước khi tự động cancel ticket.
 
 Config API dùng `includes` để mượn cấu hình PostgreSQL, với đường dẫn được tính từ
 vị trí file API. Giá trị trong file API sẽ override giá trị được include nếu trùng key.
@@ -42,6 +51,8 @@ Model generator vẫn có thể đọc trực tiếp config PostgreSQL. Biến m
 `KAFKA_TOPIC`, nếu được khai báo, sẽ override cấu hình tương ứng trong YAML.
 Worker còn nhận `WORKER_GROUP_ID`, `WORKER_MESSAGE_KEYS` (danh sách phân tách bằng
 dấu phẩy), `WORKER_BATCH_SIZE`, `WORKER_BATCH_WAIT` và `WORKER_CANCEL_AFTER`.
+Cancellation service nhận `CANCELLATION_BATCH_SIZE`, `CANCELLATION_POLL_INTERVAL`
+và `CANCELLATION_CANCEL_AFTER`.
 
 Topic `ticket` có 100 partition. Kafka key là `event_id % 100` và được map trực tiếp
 vào partition cùng số. Mỗi worker chỉ mở reader cho các partition liệt kê trong
@@ -60,7 +71,8 @@ trong bảng `goose_db_version`.
 - `migrations/003_create_tickets.sql`: tạo bảng `tickets` với UUID do API sinh và
   cặp `(user_id, client_order_id)` unique; đồng thời tạo hypertable TimescaleDB
   `ticket_done` cùng các cột, partition theo `updated_at`. Các ràng buộc unique của
-  `ticket_done` có thêm `updated_at` theo yêu cầu của TimescaleDB.
+  `ticket_done` có thêm `updated_at` theo yêu cầu của TimescaleDB. Bảng `tickets` có
+  partial index theo `created_at` để phục vụ cancellation service.
 
 Cài Goose CLI:
 
@@ -200,7 +212,7 @@ duyệt message theo thứ tự nhận:
 - `pending`: insert vào `tickets` nếu ticket chưa tồn tại ở cả hai bảng.
 - `confirm`: chỉ chuyển ticket `pending` từ `tickets` sang `ticket_done` với status
   `confirm`.
-- `cancel`: chỉ chuyển ticket `pending` đã cũ hơn 15 phút sang `ticket_done` với
+- `cancel`: chỉ chuyển ticket `pending` đã cũ từ 20 phút sang `ticket_done` với
   status `cancelled`.
 
 Ticket và event stats của cả batch được ghi trong cùng một PostgreSQL transaction.
@@ -209,6 +221,15 @@ Sau commit, worker refresh Redis rồi mới commit Kafka offset. Pending order 
 key `tickets:client-order-id:{user_id}:{client_order_id}` trỏ tới done ticket ID.
 Duplicate hoặc message không đúng state được bỏ qua, nên batch có thể retry theo cơ
 chế at-least-once.
+
+## Ticket cancellation service
+
+Cancellation service là process độc lập với worker. Service chạy một lượt ngay khi
+khởi động, sau đó mỗi `poll_interval` (local là 1 phút) poll toàn bộ bảng `tickets`,
+không lọc theo `message_key`. Các ticket `pending` đã được tạo từ 20 phút trở lên
+được publish lên Kafka với status `cancel`; worker consumer thực hiện việc chuyển
+trạng thái. Mỗi lượt query tối đa `batch_size`; duplicate message vẫn an toàn nhờ
+xử lý idempotent ở worker.
 
 ## Test
 

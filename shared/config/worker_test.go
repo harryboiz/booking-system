@@ -7,7 +7,7 @@ func TestWorkerValidation(t *testing.T) {
 		Kafka: KafkaConnection{Brokers: []string{"localhost:9092"}, Topic: "ticket"},
 		Settings: WorkerSettings{
 			GroupID: "worker", MessageKeys: []int{1, 2}, BatchSize: 10000,
-			BatchWait: "1s", CancelAfter: "15m",
+			BatchWait: "1s", CancelAfter: "20m",
 		},
 	}
 	if err := valid.Validate(); err != nil {

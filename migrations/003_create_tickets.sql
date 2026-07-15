@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS tickets (
 CREATE INDEX IF NOT EXISTS idx_tickets_event_id ON tickets (event_id);
 CREATE INDEX IF NOT EXISTS idx_tickets_user_id ON tickets (user_id);
 CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets (status);
+CREATE INDEX IF NOT EXISTS idx_tickets_pending_created_at
+    ON tickets (created_at, id)
+    WHERE status = 'pending';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tickets_user_id_client_order_id
     ON tickets (user_id, client_order_id);
 

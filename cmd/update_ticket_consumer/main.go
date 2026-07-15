@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"ticket/service/worker"
+	kafkaprocessor "ticket/service/kafka_processor"
 	sharedconfig "ticket/shared/config"
 	"ticket/shared/database"
 	sharedkafka "ticket/shared/kafka"
@@ -63,13 +63,13 @@ func main() {
 	}(ticketCache)
 	eventRepository := repositoryimpl.NewEventRepository(db)
 	ticketRepository := repositoryimpl.NewTicketRepository(db)
-	processor := worker.NewProcessor(
+	updateTicket := kafkaprocessor.NewUpdateTicket(
 		eventRepository, ticketRepository, eventCache, ticketCache, cancelAfter, slog.Default(),
 	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := processor.Reconcile(ctx, cfg.Settings.MessageKeys); err != nil {
+	if err := updateTicket.Reconcile(ctx, cfg.Settings.MessageKeys); err != nil {
 		slog.Error("cannot reconcile worker events", "error", err)
 		os.Exit(1)
 	}
@@ -80,14 +80,14 @@ func main() {
 		MessageKeys: cfg.Settings.MessageKeys,
 		BatchSize:   cfg.Settings.BatchSize,
 		BatchWait:   batchWait,
-	}, processor, slog.Default())
+	}, updateTicket, slog.Default())
 	if err != nil {
 		slog.Error("cannot initialize kafka consumer", "error", err)
 		os.Exit(1)
 	}
 
 	slog.Info("ticket worker started", "message_keys", cfg.Settings.MessageKeys,
-		"batch_size", cfg.Settings.BatchSize)
+		"batch_size", cfg.Settings.BatchSize, "cancel_after", cancelAfter)
 	if err := consumer.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		slog.Error("ticket worker stopped", "error", err)
 		os.Exit(1)
