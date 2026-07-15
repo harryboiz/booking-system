@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -13,6 +14,7 @@ import (
 	"ticket/service/api/validation"
 	"ticket/shared/kafka"
 	"ticket/shared/model/entity"
+	"ticket/shared/repository"
 )
 
 const (
@@ -22,6 +24,7 @@ const (
 
 type TicketHandler struct {
 	ticketCache TicketCache
+	ticketStore repository.TicketRepository
 	eventCache  EventCache
 	publisher   TicketPublisher
 }
@@ -42,10 +45,73 @@ type TicketPublisher interface {
 
 func NewTicketHandler(
 	ticketCache TicketCache,
+	ticketStore repository.TicketRepository,
 	eventCache EventCache,
 	publisher TicketPublisher,
 ) *TicketHandler {
-	return &TicketHandler{ticketCache: ticketCache, eventCache: eventCache, publisher: publisher}
+	return &TicketHandler{
+		ticketCache: ticketCache,
+		ticketStore: ticketStore,
+		eventCache:  eventCache,
+		publisher:   publisher,
+	}
+}
+
+func (handler *TicketHandler) GetTicketByID(w http.ResponseWriter, r *http.Request) {
+	input, err := validation.ValidateGetTicket(r)
+	if err != nil {
+		apierror.Write(w, err)
+		return
+	}
+
+	ticketID := input.TicketID
+	if ticketID == uuid.Nil {
+		ticketID, err = handler.ticketCache.GetOrderID(
+			r.Context(), input.UserID, input.ClientOrderID,
+		)
+		if err != nil {
+			apierror.Write(w, err)
+			return
+		}
+	}
+
+	if ticketID != uuid.Nil {
+		pendingTicket, cacheErr := handler.ticketCache.GetTicketByID(r.Context(), ticketID)
+		if cacheErr != nil {
+			apierror.Write(w, cacheErr)
+			return
+		}
+		if pendingTicket.ID != uuid.Nil {
+			if pendingTicket.UserID != input.UserID ||
+				(input.ClientOrderID != "" && pendingTicket.ClientOrderID != input.ClientOrderID) {
+				apierror.Write(w, apierror.New(http.StatusNotFound, "ticket not found"))
+				return
+			}
+			apiresponse.Write(w, http.StatusOK, ticketDTO(pendingTicket))
+			return
+		}
+	}
+
+	var doneTicket entity.TicketDone
+	if input.TicketID != uuid.Nil {
+		doneTicket, err = handler.ticketStore.GetDoneTicketByID(
+			r.Context(), input.UserID, input.TicketID,
+		)
+	} else {
+		doneTicket, err = handler.ticketStore.GetDoneTicketByClientOrderID(
+			r.Context(), input.UserID, input.ClientOrderID,
+		)
+	}
+	if err != nil {
+		if errors.Is(err, repository.ErrTicketNotFound) {
+			apierror.Write(w, apierror.Wrap(http.StatusNotFound, "ticket not found", err))
+			return
+		}
+		apierror.Write(w, err)
+		return
+	}
+
+	apiresponse.Write(w, http.StatusOK, doneTicketDTO(doneTicket))
 }
 
 func (handler *TicketHandler) CreatePendingTicket(w http.ResponseWriter, r *http.Request) {
@@ -138,4 +204,28 @@ func (handler *TicketHandler) ConfirmTicket(w http.ResponseWriter, r *http.Reque
 	}
 
 	apiresponse.Write(w, http.StatusAccepted, dto.PendingTicket{TicketID: ticket.ID})
+}
+
+func ticketDTO(ticket entity.Ticket) dto.Ticket {
+	return dto.Ticket{
+		ID:            ticket.ID,
+		EventID:       ticket.EventID,
+		UserID:        ticket.UserID,
+		ClientOrderID: ticket.ClientOrderID,
+		Status:        ticket.Status,
+		CreatedAt:     ticket.CreatedAt,
+		UpdatedAt:     ticket.UpdatedAt,
+	}
+}
+
+func doneTicketDTO(ticket entity.TicketDone) dto.Ticket {
+	return dto.Ticket{
+		ID:            ticket.ID,
+		EventID:       ticket.EventID,
+		UserID:        ticket.UserID,
+		ClientOrderID: ticket.ClientOrderID,
+		Status:        ticket.Status,
+		CreatedAt:     ticket.CreatedAt,
+		UpdatedAt:     ticket.UpdatedAt,
+	}
 }

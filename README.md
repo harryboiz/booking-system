@@ -155,6 +155,21 @@ mapping từ client order sang UUID; worker tiếp tục cập nhật tồn kho,
 ticket và sửa lại cache khi xử lý hoặc reconcile.
 Nếu hết vé, API trả `409 Conflict` với `{"error":"tickets sold out"}`.
 
+### Lấy ticket
+
+Truyền `user_id` và đúng một trong hai query parameter `ticket_id` hoặc
+`client_order_id`:
+
+```bash
+curl -i 'http://localhost:8080/tickets?user_id=10&ticket_id=c7bca801-a080-45c9-972c-860cd4e44ab6'
+
+curl -i 'http://localhost:8080/tickets?user_id=10&client_order_id=order-20260715-0001'
+```
+
+API ưu tiên đọc pending ticket từ Redis. Nếu không có pending ticket, API đọc bản
+ghi mới nhất tương ứng trong bảng `ticket_done`. Ticket không tồn tại hoặc không
+thuộc `user_id` trả `404 Not Found`.
+
 ### Confirm ticket
 
 ```bash

@@ -57,8 +57,9 @@ func main() {
 	defer publisher.Close()
 
 	eventStore := repositoryimpl.NewEventRepository(db)
+	ticketStore := repositoryimpl.NewTicketRepository(db)
 	eventHandler := handler.NewEventHandler(eventStore)
-	ticketHandler := handler.NewTicketHandler(ticketCache, eventCache, publisher)
+	ticketHandler := handler.NewTicketHandler(ticketCache, ticketStore, eventCache, publisher)
 	server := &http.Server{
 		Addr:              apiConfig.Server.Address,
 		Handler:           api.NewHandler(eventHandler, ticketHandler),

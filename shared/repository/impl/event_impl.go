@@ -23,6 +23,33 @@ func NewEventRepository(db *gorm.DB) repository.EventRepository {
 	return &EventRepositoryImpl{db: db}
 }
 
+func (impl *EventRepositoryImpl) FindEventsByMessageKeys(
+	ctx context.Context,
+	messageKeys []int,
+	batchMessageKey int,
+) ([]entity.Event, error) {
+	var events []entity.Event
+	if err := impl.db.WithContext(ctx).
+		Where("MOD(id, ?) IN ?", batchMessageKey, messageKeys).
+		Where("end_time > NOW() + INTERVAL '1 day'").
+		Order("id").
+		Find(&events).Error; err != nil {
+		return nil, fmt.Errorf("load events by message keys: %w", err)
+	}
+	return events, nil
+}
+
+func (impl *EventRepositoryImpl) FindEventsByIDs(
+	ctx context.Context,
+	eventIDs []int64,
+) ([]entity.Event, error) {
+	var events []entity.Event
+	if err := impl.db.WithContext(ctx).Where("id IN ?", eventIDs).Order("id").Find(&events).Error; err != nil {
+		return nil, fmt.Errorf("load events: %w", err)
+	}
+	return events, nil
+}
+
 func (impl *EventRepositoryImpl) Create(ctx context.Context, record entity.Event) (entity.Event, error) {
 	if err := impl.db.WithContext(ctx).Create(&record).Error; err != nil {
 		return entity.Event{}, fmt.Errorf("create event: %w", err)
@@ -59,7 +86,7 @@ func (impl *EventRepositoryImpl) Update(ctx context.Context, id string, in entit
 	err = impl.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		result := tx.Model(&entity.Event{}).Where("id = ?", numericID).Updates(map[string]any{
 			"name": in.Name, "description": in.Description, "start_date": in.StartDate,
-			"end_time": in.EndTime,
+			"end_time":      in.EndTime,
 			"total_tickets": in.TotalTickets, "ticket_price": in.TicketPrice,
 			"updated_at": time.Now(),
 		})

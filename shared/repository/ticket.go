@@ -2,16 +2,19 @@ package repository
 
 import (
 	"context"
+	"errors"
 
 	"github.com/google/uuid"
 
 	"ticket/shared/model/entity"
 )
 
+var ErrTicketNotFound = errors.New("ticket not found")
+
 // TicketRepository contains persistence operations for tickets and their event stats.
 type TicketRepository interface {
-	FindEventsByMessageKeys(context.Context, []int, int) ([]entity.Event, error)
-	FindEventsByIDs(context.Context, []int64) ([]entity.Event, error)
+	GetDoneTicketByID(context.Context, int64, uuid.UUID) (entity.TicketDone, error)
+	GetDoneTicketByClientOrderID(context.Context, int64, string) (entity.TicketDone, error)
 	FindPendingTicketsByEventIDs(context.Context, []int64) ([]entity.Ticket, error)
 	FindDoneTicketsByEventIDs(context.Context, []int64) ([]entity.TicketDone, error)
 	FindPendingTicketsByIDs(context.Context, []uuid.UUID) ([]entity.Ticket, error)

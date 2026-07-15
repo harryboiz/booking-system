@@ -61,7 +61,7 @@ func TestReconcileCachesTicketsForWorkerEvents(t *testing.T) {
 		done:    []entity.TicketDone{{ID: doneID, EventID: 101, UserID: 11, ClientOrderID: "done-1"}},
 	}
 	cache := &reconcileCache{}
-	processor := NewProcessor(repository, cache, cache, 15*time.Minute, nil)
+	processor := NewProcessor(repository, repository, cache, cache, 15*time.Minute, nil)
 
 	if err := processor.Reconcile(context.Background(), []int{1}); err != nil {
 		t.Fatal(err)
@@ -91,6 +91,22 @@ type reconcileRepository struct {
 	doneEventIDs    []int64
 }
 
+func (repository *reconcileRepository) GetDoneTicketByID(
+	context.Context,
+	int64,
+	uuid.UUID,
+) (entity.TicketDone, error) {
+	return entity.TicketDone{}, nil
+}
+
+func (repository *reconcileRepository) GetDoneTicketByClientOrderID(
+	context.Context,
+	int64,
+	string,
+) (entity.TicketDone, error) {
+	return entity.TicketDone{}, nil
+}
+
 func (repository *reconcileRepository) FindEventsByMessageKeys(
 	context.Context,
 	[]int,
@@ -104,6 +120,33 @@ func (repository *reconcileRepository) FindEventsByIDs(
 	[]int64,
 ) ([]entity.Event, error) {
 	return nil, nil
+}
+
+func (repository *reconcileRepository) Create(
+	context.Context,
+	entity.Event,
+) (entity.Event, error) {
+	return entity.Event{}, nil
+}
+
+func (repository *reconcileRepository) List(context.Context) ([]entity.Event, error) {
+	return nil, nil
+}
+
+func (repository *reconcileRepository) Get(context.Context, string) (entity.Event, error) {
+	return entity.Event{}, nil
+}
+
+func (repository *reconcileRepository) Update(
+	context.Context,
+	string,
+	entity.Event,
+) (entity.Event, error) {
+	return entity.Event{}, nil
+}
+
+func (repository *reconcileRepository) Delete(context.Context, string) error {
+	return nil
 }
 
 func (repository *reconcileRepository) FindPendingTicketsByEventIDs(

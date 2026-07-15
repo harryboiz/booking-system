@@ -33,6 +33,21 @@ func newFakeEventRepository() *fakeEventRepository {
 	return &fakeEventRepository{events: make(map[string]entity.Event)}
 }
 
+func (r *fakeEventRepository) FindEventsByMessageKeys(
+	context.Context,
+	[]int,
+	int,
+) ([]entity.Event, error) {
+	return nil, nil
+}
+
+func (r *fakeEventRepository) FindEventsByIDs(
+	context.Context,
+	[]int64,
+) ([]entity.Event, error) {
+	return nil, nil
+}
+
 func (r *fakeEventRepository) Create(_ context.Context, event entity.Event) (entity.Event, error) {
 	r.nextID++
 	event.ID = int64(r.nextID)

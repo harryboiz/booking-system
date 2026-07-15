@@ -3,6 +3,7 @@ package dto
 import (
 	"errors"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -17,6 +18,12 @@ type PendingTicketInput struct {
 type ConfirmTicketInput struct {
 	UserID   int64     `json:"user_id"`
 	TicketID uuid.UUID `json:"ticket_id"`
+}
+
+type GetTicketInput struct {
+	UserID        int64
+	TicketID      uuid.UUID
+	ClientOrderID string
 }
 
 func (input ConfirmTicketInput) Validate() error {
@@ -48,4 +55,14 @@ func (input PendingTicketInput) Validate() error {
 
 type PendingTicket struct {
 	TicketID uuid.UUID `json:"ticket_id"`
+}
+
+type Ticket struct {
+	ID            uuid.UUID `json:"id"`
+	EventID       int64     `json:"event_id"`
+	UserID        int64     `json:"user_id"`
+	ClientOrderID string    `json:"client_order_id"`
+	Status        string    `json:"status"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }

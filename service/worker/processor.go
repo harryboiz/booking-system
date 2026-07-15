@@ -33,11 +33,12 @@ type TicketCache interface {
 }
 
 type Processor struct {
-	repository  repository.TicketRepository
-	eventCache  EventCache
-	ticketCache TicketCache
-	cancelAfter time.Duration
-	logger      *slog.Logger
+	eventRepository  repository.EventRepository
+	ticketRepository repository.TicketRepository
+	eventCache       EventCache
+	ticketCache      TicketCache
+	cancelAfter      time.Duration
+	logger           *slog.Logger
 }
 
 type decodedMessage struct {
@@ -46,7 +47,8 @@ type decodedMessage struct {
 }
 
 func NewProcessor(
-	repository repository.TicketRepository,
+	eventRepository repository.EventRepository,
+	ticketRepository repository.TicketRepository,
 	eventCache EventCache,
 	ticketCache TicketCache,
 	cancelAfter time.Duration,
@@ -56,14 +58,15 @@ func NewProcessor(
 		logger = slog.Default()
 	}
 	return &Processor{
-		repository: repository, eventCache: eventCache, ticketCache: ticketCache,
+		eventRepository: eventRepository, ticketRepository: ticketRepository,
+		eventCache: eventCache, ticketCache: ticketCache,
 		cancelAfter: cancelAfter, logger: logger,
 	}
 }
 
 // Reconcile refreshes Redis snapshots for this worker's shards from PostgreSQL.
 func (processor *Processor) Reconcile(ctx context.Context, messageKeys []int) error {
-	events, err := processor.repository.FindEventsByMessageKeys(
+	events, err := processor.eventRepository.FindEventsByMessageKeys(
 		ctx, messageKeys, int(sharedkafka.MessageKeyCount),
 	)
 	if err != nil {
@@ -73,11 +76,11 @@ func (processor *Processor) Reconcile(ctx context.Context, messageKeys []int) er
 	for index := range events {
 		eventIDs[index] = events[index].ID
 	}
-	pendingOrders, err := processor.repository.FindPendingTicketsByEventIDs(ctx, eventIDs)
+	pendingOrders, err := processor.ticketRepository.FindPendingTicketsByEventIDs(ctx, eventIDs)
 	if err != nil {
 		return err
 	}
-	doneOrders, err := processor.repository.FindDoneTicketsByEventIDs(ctx, eventIDs)
+	doneOrders, err := processor.ticketRepository.FindDoneTicketsByEventIDs(ctx, eventIDs)
 	if err != nil {
 		return err
 	}
@@ -93,7 +96,7 @@ func (processor *Processor) Process(ctx context.Context, records []kafkago.Messa
 	}
 
 	eventIDs := uniqueEventIDs(decoded)
-	events, err := processor.repository.FindEventsByIDs(ctx, eventIDs)
+	events, err := processor.eventRepository.FindEventsByIDs(ctx, eventIDs)
 	if err != nil {
 		return err
 	}
@@ -103,11 +106,11 @@ func (processor *Processor) Process(ctx context.Context, records []kafkago.Messa
 	}
 
 	ticketIDs := uniqueTicketIDs(decoded)
-	activeTickets, err := processor.repository.FindPendingTicketsByIDs(ctx, ticketIDs)
+	activeTickets, err := processor.ticketRepository.FindPendingTicketsByIDs(ctx, ticketIDs)
 	if err != nil {
 		return err
 	}
-	doneTickets, err := processor.repository.FindDoneTicketsByIDs(ctx, ticketIDs)
+	doneTickets, err := processor.ticketRepository.FindDoneTicketsByIDs(ctx, ticketIDs)
 	if err != nil {
 		return err
 	}
@@ -198,7 +201,7 @@ func (processor *Processor) Process(ctx context.Context, records []kafkago.Messa
 		event.UpdatedAt = now
 		updatedEventStats = append(updatedEventStats, *event)
 	}
-	if err := processor.repository.PersistTicketChanges(
+	if err := processor.ticketRepository.PersistTicketChanges(
 		ctx, pendingTickets, deletePendingTickets, newDoneTickets, updatedEventStats,
 	); err != nil {
 		return err

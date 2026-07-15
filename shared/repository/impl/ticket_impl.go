@@ -2,6 +2,7 @@ package impl
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -27,31 +28,43 @@ func NewTicketRepository(db *gorm.DB) repository.TicketRepository {
 	return &TicketRepositoryImpl{db: db}
 }
 
-func (impl *TicketRepositoryImpl) FindEventsByMessageKeys(
+func (impl *TicketRepositoryImpl) GetDoneTicketByID(
 	ctx context.Context,
-	messageKeys []int,
-	batchMessageKey int,
-) ([]entity.Event, error) {
-	var events []entity.Event
-	if err := impl.db.WithContext(ctx).
-		Where("MOD(id, ?) IN ?", batchMessageKey, messageKeys).
-		Where("end_time > NOW() + INTERVAL '1 day'").
-		Order("id").
-		Find(&events).Error; err != nil {
-		return nil, fmt.Errorf("load events by message keys: %w", err)
+	userID int64,
+	ticketID uuid.UUID,
+) (entity.TicketDone, error) {
+	var ticket entity.TicketDone
+	err := impl.db.WithContext(ctx).
+		Where("user_id = ? AND id = ?", userID, ticketID).
+		Order("updated_at DESC").
+		First(&ticket).Error
+	if err != nil {
+		return entity.TicketDone{}, mapTicketQueryError("get completed ticket by id", err)
 	}
-	return events, nil
+	return ticket, nil
 }
 
-func (impl *TicketRepositoryImpl) FindEventsByIDs(
+func (impl *TicketRepositoryImpl) GetDoneTicketByClientOrderID(
 	ctx context.Context,
-	eventIDs []int64,
-) ([]entity.Event, error) {
-	var events []entity.Event
-	if err := impl.db.WithContext(ctx).Where("id IN ?", eventIDs).Order("id").Find(&events).Error; err != nil {
-		return nil, fmt.Errorf("load events: %w", err)
+	userID int64,
+	clientOrderID string,
+) (entity.TicketDone, error) {
+	var ticket entity.TicketDone
+	err := impl.db.WithContext(ctx).
+		Where("user_id = ? AND client_order_id = ?", userID, clientOrderID).
+		Order("updated_at DESC").
+		First(&ticket).Error
+	if err != nil {
+		return entity.TicketDone{}, mapTicketQueryError("get completed ticket by client order id", err)
 	}
-	return events, nil
+	return ticket, nil
+}
+
+func mapTicketQueryError(operation string, err error) error {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return repository.ErrTicketNotFound
+	}
+	return fmt.Errorf("%s: %w", operation, err)
 }
 
 func (impl *TicketRepositoryImpl) FindPendingTicketsByEventIDs(

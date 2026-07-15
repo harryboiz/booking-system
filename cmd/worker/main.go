@@ -61,8 +61,11 @@ func main() {
 
 		}
 	}(ticketCache)
+	eventRepository := repositoryimpl.NewEventRepository(db)
 	ticketRepository := repositoryimpl.NewTicketRepository(db)
-	processor := worker.NewProcessor(ticketRepository, eventCache, ticketCache, cancelAfter, slog.Default())
+	processor := worker.NewProcessor(
+		eventRepository, ticketRepository, eventCache, ticketCache, cancelAfter, slog.Default(),
+	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
