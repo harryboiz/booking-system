@@ -12,16 +12,22 @@ import (
 	"ticket/service/api/dto"
 	"ticket/service/api/validation"
 	"ticket/shared/kafka"
+	"ticket/shared/model/entity"
 )
 
 type TicketHandler struct {
-	inventory TicketInventory
-	publisher TicketPublisher
+	ticketCache TicketCache
+	eventCache  EventCache
+	publisher   TicketPublisher
 }
 
-type TicketInventory interface {
-	ClientOrderIDExists(ctx context.Context, userID int64, clientOrderID string) (bool, error)
-	HasAvailable(ctx context.Context, eventID int64) (bool, error)
+type TicketCache interface {
+	GetOrderID(ctx context.Context, userID int64, clientOrderID string) (uuid.UUID, error)
+	SetOrderID(ctx context.Context, userID int64, clientOrderID string, orderID uuid.UUID) error
+}
+
+type EventCache interface {
+	GetEventByID(ctx context.Context, eventID int64) (entity.Event, error)
 }
 
 type TicketPublisher interface {
@@ -29,10 +35,11 @@ type TicketPublisher interface {
 }
 
 func NewTicketHandler(
-	inventory TicketInventory,
+	ticketCache TicketCache,
+	eventCache EventCache,
 	publisher TicketPublisher,
 ) *TicketHandler {
-	return &TicketHandler{inventory: inventory, publisher: publisher}
+	return &TicketHandler{ticketCache: ticketCache, eventCache: eventCache, publisher: publisher}
 }
 
 func (handler *TicketHandler) CreatePendingTicket(w http.ResponseWriter, r *http.Request) {
@@ -43,22 +50,23 @@ func (handler *TicketHandler) CreatePendingTicket(w http.ResponseWriter, r *http
 	}
 
 	clientOrderID := strings.TrimSpace(input.ClientOrderID)
-	exists, err := handler.inventory.ClientOrderIDExists(r.Context(), input.UserID, clientOrderID)
+	orderID, err := handler.ticketCache.GetOrderID(r.Context(), input.UserID, clientOrderID)
 	if err != nil {
 		apierror.Write(w, err)
 		return
 	}
-	if exists {
-		apierror.Write(w, apierror.New(http.StatusConflict, "client_order_id already exists"))
+	if orderID != uuid.Nil {
+		apiresponse.Write(w, http.StatusAccepted, dto.PendingTicket{TicketID: orderID})
 		return
 	}
 
-	available, err := handler.inventory.HasAvailable(r.Context(), input.EventID)
+	event, err := handler.eventCache.GetEventByID(r.Context(), input.EventID)
 	if err != nil {
 		apierror.Write(w, err)
 		return
 	}
-	if !available {
+	remainingTickets := int64(event.TotalTickets) - event.PendingTickets - event.ConfirmTickets
+	if remainingTickets <= 0 {
 		apierror.Write(w, apierror.New(http.StatusConflict, "tickets sold out"))
 		return
 	}
@@ -71,6 +79,12 @@ func (handler *TicketHandler) CreatePendingTicket(w http.ResponseWriter, r *http
 		Status:        "pending",
 	}
 	if err := handler.publisher.Publish(r.Context(), message); err != nil {
+		apierror.Write(w, err)
+		return
+	}
+	if err := handler.ticketCache.SetOrderID(
+		r.Context(), input.UserID, clientOrderID, message.ID,
+	); err != nil {
 		apierror.Write(w, err)
 		return
 	}

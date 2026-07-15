@@ -61,7 +61,7 @@ func TestReconcileCachesTicketsForWorkerEvents(t *testing.T) {
 		done:    []entity.TicketDone{{ID: doneID, EventID: 101, UserID: 11, ClientOrderID: "done-1"}},
 	}
 	cache := &reconcileCache{}
-	processor := NewProcessor(repository, cache, 15*time.Minute, nil)
+	processor := NewProcessor(repository, cache, cache, 15*time.Minute, nil)
 
 	if err := processor.Reconcile(context.Background(), []int{1}); err != nil {
 		t.Fatal(err)
@@ -164,7 +164,7 @@ func (cache *reconcileCache) SetEvents(_ context.Context, events []entity.Event)
 	return nil
 }
 
-func (cache *reconcileCache) SetOrders(
+func (cache *reconcileCache) SetTicket(
 	_ context.Context,
 	pending []entity.Ticket,
 	done []entity.TicketDone,

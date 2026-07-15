@@ -26,12 +26,16 @@ const (
 type EventCache interface {
 	GetEvents(context.Context, []int64) (map[int64]entity.Event, error)
 	SetEvents(context.Context, []entity.Event) error
-	SetOrders(context.Context, []entity.Ticket, []entity.TicketDone) error
+}
+
+type TicketCache interface {
+	SetTicket(context.Context, []entity.Ticket, []entity.TicketDone) error
 }
 
 type Processor struct {
 	repository  repository.TicketRepository
-	cache       EventCache
+	eventCache  EventCache
+	ticketCache TicketCache
 	cancelAfter time.Duration
 	logger      *slog.Logger
 }
@@ -43,14 +47,18 @@ type decodedMessage struct {
 
 func NewProcessor(
 	repository repository.TicketRepository,
-	cache EventCache,
+	eventCache EventCache,
+	ticketCache TicketCache,
 	cancelAfter time.Duration,
 	logger *slog.Logger,
 ) *Processor {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Processor{repository: repository, cache: cache, cancelAfter: cancelAfter, logger: logger}
+	return &Processor{
+		repository: repository, eventCache: eventCache, ticketCache: ticketCache,
+		cancelAfter: cancelAfter, logger: logger,
+	}
 }
 
 // Reconcile refreshes Redis snapshots for this worker's shards from PostgreSQL.
@@ -74,7 +82,7 @@ func (processor *Processor) Reconcile(ctx context.Context, messageKeys []int) er
 		return err
 	}
 	processor.updateEventCache(ctx, events)
-	processor.updateOrderCache(ctx, pendingOrders, doneOrders)
+	processor.updateTicketCache(ctx, pendingOrders, doneOrders)
 	return nil
 }
 
@@ -196,7 +204,7 @@ func (processor *Processor) Process(ctx context.Context, records []kafkago.Messa
 		return err
 	}
 	processor.updateEventCache(ctx, updatedEventStats)
-	processor.updateOrderCache(ctx, pendingOrders(activeByID), completedOrders(doneByID))
+	processor.updateTicketCache(ctx, pendingOrders(activeByID), completedOrders(doneByID))
 	return nil
 }
 
@@ -237,18 +245,18 @@ func (processor *Processor) decode(records []kafkago.Message) []decodedMessage {
 }
 
 func (processor *Processor) updateEventCache(ctx context.Context, events []entity.Event) {
-	if err := processor.cache.SetEvents(ctx, events); err != nil {
+	if err := processor.eventCache.SetEvents(ctx, events); err != nil {
 		// PostgreSQL is the source of truth. A later batch or startup reconciliation repairs Redis.
 		processor.logger.Warn("cannot update events in redis", "error", err)
 	}
 }
 
-func (processor *Processor) updateOrderCache(
+func (processor *Processor) updateTicketCache(
 	ctx context.Context,
 	pendingOrders []entity.Ticket,
 	doneOrders []entity.TicketDone,
 ) {
-	if err := processor.cache.SetOrders(ctx, pendingOrders, doneOrders); err != nil {
+	if err := processor.ticketCache.SetTicket(ctx, pendingOrders, doneOrders); err != nil {
 		// PostgreSQL is the source of truth. A duplicate message can repair a stale cache later.
 		processor.logger.Warn("cannot update orders in redis", "error", err)
 	}

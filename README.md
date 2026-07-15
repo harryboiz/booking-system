@@ -130,12 +130,8 @@ Các cột stats chỉ đọc qua API và do worker quản lý.
 
 ### Tạo pending ticket
 
-Redis lưu số vé có thể reserve theo key `tickets:reserved:{event_id}`. Ví dụ event 1
-còn 100 vé:
-
-```bash
-docker compose exec redis redis-cli SET tickets:reserved:1 100
-```
+Redis lưu snapshot event theo key `events:{event_id}`. API đọc snapshot này và tính số
+vé còn lại bằng `total_tickets - pending_tickets - confirm_tickets`.
 
 Gọi API:
 
@@ -149,13 +145,14 @@ curl -i -X POST http://localhost:8080/tickets/pending \
   }'
 ```
 
-API dùng Redis `SETNX` để kiểm tra và giữ atomic key
-`tickets:client-order-id:{user_id}:{client_order_id}`, rồi từ chối nếu key đã tồn tại.
-Key được giữ lại để chặn retry, kể cả khi các bước tiếp theo thất bại. Sau đó API
-kiểm tra Redis còn vé nhưng không giảm tồn kho, sinh UUID rồi publish `UpdatedTicket`
-vào topic Kafka `ticket` với key là `event_id % 100`. Worker chịu trách nhiệm cập nhật
-tồn kho. API trả `202 Accepted` với `ticket_id`; nếu hết vé, API trả `409 Conflict`
-với `{"error":"tickets sold out"}`.
+API đọc Redis key `tickets:client-order-id:{user_id}:{client_order_id}`. Nếu key đã
+trỏ tới một `order_id`, API trả ngay `202 Accepted` với `ticket_id` đó mà không kiểm
+tra tồn kho hoặc publish lại. Nếu cache miss, API đọc event từ Redis để kiểm tra còn
+vé nhưng không giảm tồn kho, sinh UUID rồi publish `UpdatedTicket` vào topic Kafka
+`ticket` với key là `event_id % 100`. Sau khi publish thành công, API cập nhật ngay
+mapping từ client order sang UUID; worker tiếp tục cập nhật tồn kho, snapshot ticket
+và sửa lại cache khi xử lý hoặc reconcile.
+Nếu hết vé, API trả `409 Conflict` với `{"error":"tickets sold out"}`.
 
 ## Ticket worker
 

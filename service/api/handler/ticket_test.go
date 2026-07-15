@@ -13,6 +13,7 @@ import (
 
 	"ticket/service/api/dto"
 	"ticket/shared/kafka"
+	"ticket/shared/model/entity"
 )
 
 const validPendingTicket = `{
@@ -22,30 +23,48 @@ const validPendingTicket = `{
 }`
 
 type fakeInventory struct {
-	clientOrderExists      bool
-	clientOrderExistsError error
-	clientOrderChecks      int
-	checkedUserID          int64
-	checkedClientOrderID   string
-	available              bool
-	availableError         error
-	availableChecks        int
+	orderID              uuid.UUID
+	getOrderIDError      error
+	getOrderIDCalls      int
+	checkedUserID        int64
+	checkedClientOrderID string
+	setOrderIDError      error
+	setOrderIDCalls      int
+	setOrderUserID       int64
+	setClientOrderID     string
+	setOrderID           uuid.UUID
+	event                entity.Event
+	eventError           error
+	eventChecks          int
 }
 
-func (inventory *fakeInventory) ClientOrderIDExists(
+func (inventory *fakeInventory) GetOrderID(
 	_ context.Context,
 	userID int64,
 	clientOrderID string,
-) (bool, error) {
-	inventory.clientOrderChecks++
+) (uuid.UUID, error) {
+	inventory.getOrderIDCalls++
 	inventory.checkedUserID = userID
 	inventory.checkedClientOrderID = clientOrderID
-	return inventory.clientOrderExists, inventory.clientOrderExistsError
+	return inventory.orderID, inventory.getOrderIDError
 }
 
-func (inventory *fakeInventory) HasAvailable(context.Context, int64) (bool, error) {
-	inventory.availableChecks++
-	return inventory.available, inventory.availableError
+func (inventory *fakeInventory) SetOrderID(
+	_ context.Context,
+	userID int64,
+	clientOrderID string,
+	orderID uuid.UUID,
+) error {
+	inventory.setOrderIDCalls++
+	inventory.setOrderUserID = userID
+	inventory.setClientOrderID = clientOrderID
+	inventory.setOrderID = orderID
+	return inventory.setOrderIDError
+}
+
+func (inventory *fakeInventory) GetEventByID(context.Context, int64) (entity.Event, error) {
+	inventory.eventChecks++
+	return inventory.event, inventory.eventError
 }
 
 type fakePublisher struct {
@@ -69,9 +88,9 @@ func pendingTicketRequest(handler *TicketHandler, body string) *httptest.Respons
 }
 
 func TestCreatePendingTicketPublishesMessage(t *testing.T) {
-	inventory := &fakeInventory{available: true}
+	inventory := &fakeInventory{event: entity.Event{ID: 20, TotalTickets: 1}}
 	publisher := &fakePublisher{}
-	response := pendingTicketRequest(NewTicketHandler(inventory, publisher), validPendingTicket)
+	response := pendingTicketRequest(NewTicketHandler(inventory, inventory, publisher), validPendingTicket)
 
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
@@ -93,6 +112,16 @@ func TestCreatePendingTicketPublishesMessage(t *testing.T) {
 		publisher.message.ClientOrderID != "order-123" || publisher.message.Status != "pending" {
 		t.Fatalf("unexpected message: %+v", publisher.message)
 	}
+	if inventory.setOrderIDCalls != 1 || inventory.setOrderUserID != 10 ||
+		inventory.setClientOrderID != "order-123" || inventory.setOrderID != publisher.message.ID {
+		t.Fatalf(
+			"cached order = calls:%d user:%d client:%q order:%s",
+			inventory.setOrderIDCalls,
+			inventory.setOrderUserID,
+			inventory.setClientOrderID,
+			inventory.setOrderID,
+		)
+	}
 	var result dto.PendingTicket
 	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
 		t.Fatal(err)
@@ -102,30 +131,38 @@ func TestCreatePendingTicketPublishesMessage(t *testing.T) {
 	}
 }
 
-func TestCreatePendingTicketReturnsConflictForExistingClientOrderID(t *testing.T) {
-	inventory := &fakeInventory{clientOrderExists: true, available: true}
+func TestCreatePendingTicketReturnsExistingOrderID(t *testing.T) {
+	orderID := uuid.New()
+	inventory := &fakeInventory{orderID: orderID}
 	publisher := &fakePublisher{}
-	response := pendingTicketRequest(NewTicketHandler(inventory, publisher), validPendingTicket)
+	response := pendingTicketRequest(NewTicketHandler(inventory, inventory, publisher), validPendingTicket)
 
-	if response.Code != http.StatusConflict {
+	if response.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
-	if got := response.Body.String(); got != "{\"error\":\"client_order_id already exists\"}\n" {
-		t.Fatalf("body = %q", got)
+	var result dto.PendingTicket
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		t.Fatal(err)
 	}
-	if inventory.availableChecks != 0 {
-		t.Fatalf("available checks = %d", inventory.availableChecks)
+	if result.TicketID != orderID {
+		t.Fatalf("ticket_id = %s, want %s", result.TicketID, orderID)
+	}
+	if inventory.eventChecks != 0 {
+		t.Fatalf("event checks = %d", inventory.eventChecks)
 	}
 	if publisher.calls != 0 {
 		t.Fatalf("publish calls = %d", publisher.calls)
 	}
+	if inventory.setOrderIDCalls != 0 {
+		t.Fatalf("set order id calls = %d", inventory.setOrderIDCalls)
+	}
 }
 
 func TestCreatePendingTicketReturnsSoldOut(t *testing.T) {
-	inventory := &fakeInventory{available: false}
+	inventory := &fakeInventory{event: entity.Event{ID: 20, TotalTickets: 100, PendingTickets: 80, ConfirmTickets: 20}}
 	publisher := &fakePublisher{}
 	response := pendingTicketRequest(
-		NewTicketHandler(inventory, publisher),
+		NewTicketHandler(inventory, inventory, publisher),
 		validPendingTicket,
 	)
 
@@ -138,28 +175,60 @@ func TestCreatePendingTicketReturnsSoldOut(t *testing.T) {
 }
 
 func TestCreatePendingTicketReturnsErrorWhenPublishFails(t *testing.T) {
-	inventory := &fakeInventory{available: true}
+	inventory := &fakeInventory{event: entity.Event{ID: 20, TotalTickets: 1}}
 	publisher := &fakePublisher{err: errors.New("kafka unavailable")}
-	response := pendingTicketRequest(NewTicketHandler(inventory, publisher), validPendingTicket)
+	response := pendingTicketRequest(NewTicketHandler(inventory, inventory, publisher), validPendingTicket)
 
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
-	if inventory.availableChecks != 1 {
-		t.Fatalf("available checks = %d", inventory.availableChecks)
+	if inventory.eventChecks != 1 {
+		t.Fatalf("event checks = %d", inventory.eventChecks)
+	}
+	if inventory.setOrderIDCalls != 0 {
+		t.Fatalf("set order id calls = %d", inventory.setOrderIDCalls)
+	}
+}
+
+func TestCreatePendingTicketReturnsErrorWhenSetOrderIDFails(t *testing.T) {
+	inventory := &fakeInventory{
+		event:           entity.Event{ID: 20, TotalTickets: 1},
+		setOrderIDError: errors.New("redis unavailable"),
+	}
+	publisher := &fakePublisher{}
+	response := pendingTicketRequest(NewTicketHandler(inventory, inventory, publisher), validPendingTicket)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if publisher.calls != 1 || inventory.setOrderIDCalls != 1 {
+		t.Fatalf("publish calls = %d, set order id calls = %d", publisher.calls, inventory.setOrderIDCalls)
 	}
 }
 
 func TestCreatePendingTicketReturnsErrorWhenRedisCheckFails(t *testing.T) {
-	inventory := &fakeInventory{clientOrderExistsError: errors.New("redis unavailable")}
+	inventory := &fakeInventory{getOrderIDError: errors.New("redis unavailable")}
 	publisher := &fakePublisher{}
-	response := pendingTicketRequest(NewTicketHandler(inventory, publisher), validPendingTicket)
+	response := pendingTicketRequest(NewTicketHandler(inventory, inventory, publisher), validPendingTicket)
 
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
-	if inventory.availableChecks != 0 || publisher.calls != 0 {
-		t.Fatalf("available checks = %d, publish calls = %d", inventory.availableChecks, publisher.calls)
+	if inventory.eventChecks != 0 || publisher.calls != 0 {
+		t.Fatalf("event checks = %d, publish calls = %d", inventory.eventChecks, publisher.calls)
+	}
+}
+
+func TestCreatePendingTicketReturnsErrorWhenEventCacheFails(t *testing.T) {
+	inventory := &fakeInventory{eventError: errors.New("redis unavailable")}
+	publisher := &fakePublisher{}
+	response := pendingTicketRequest(NewTicketHandler(inventory, inventory, publisher), validPendingTicket)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if publisher.calls != 0 {
+		t.Fatalf("publish calls = %d", publisher.calls)
 	}
 }
 
@@ -177,7 +246,7 @@ func TestCreatePendingTicketValidation(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			response := pendingTicketRequest(
-				NewTicketHandler(&fakeInventory{available: true}, &fakePublisher{}),
+				NewTicketHandler(&fakeInventory{}, &fakeInventory{}, &fakePublisher{}),
 				test.body,
 			)
 			if response.Code != http.StatusBadRequest && response.Code != http.StatusUnprocessableEntity {

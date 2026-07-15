@@ -47,15 +47,22 @@ func main() {
 
 		}
 	}(sqlDB)
-	cache := sharedredis.NewEventCache(cfg.Redis.Address, cfg.Redis.Password, cfg.Redis.DB)
+	eventCache := sharedredis.NewEventCache(cfg.Redis.Address, cfg.Redis.Password, cfg.Redis.DB)
 	defer func(cache *sharedredis.EventCache) {
 		err := cache.Close()
 		if err != nil {
 
 		}
-	}(cache)
+	}(eventCache)
+	ticketCache := sharedredis.NewTicketCache(cfg.Redis.Address, cfg.Redis.Password, cfg.Redis.DB)
+	defer func(cache *sharedredis.TicketCache) {
+		err := cache.Close()
+		if err != nil {
+
+		}
+	}(ticketCache)
 	ticketRepository := repositoryimpl.NewTicketRepository(db)
-	processor := worker.NewProcessor(ticketRepository, cache, cancelAfter, slog.Default())
+	processor := worker.NewProcessor(ticketRepository, eventCache, ticketCache, cancelAfter, slog.Default())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -64,12 +71,12 @@ func main() {
 		os.Exit(1)
 	}
 	consumer, err := sharedkafka.NewConsumer(ctx, sharedkafka.ConsumerConfig{
-		Brokers: cfg.Kafka.Brokers,
-		Topic: cfg.Kafka.Topic,
-		GroupID: cfg.Settings.GroupID,
+		Brokers:     cfg.Kafka.Brokers,
+		Topic:       cfg.Kafka.Topic,
+		GroupID:     cfg.Settings.GroupID,
 		MessageKeys: cfg.Settings.MessageKeys,
-		BatchSize: cfg.Settings.BatchSize,
-		BatchWait: batchWait,
+		BatchSize:   cfg.Settings.BatchSize,
+		BatchWait:   batchWait,
 	}, processor, slog.Default())
 	if err != nil {
 		slog.Error("cannot initialize kafka consumer", "error", err)

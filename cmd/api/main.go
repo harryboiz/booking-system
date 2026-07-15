@@ -37,22 +37,28 @@ func main() {
 		os.Exit(1)
 	}
 	defer sqlDB.Close()
-	inventory := redis.NewTicketInventory(
+	ticketCache := redis.NewTicketCache(
 		apiConfig.Redis.Address,
 		apiConfig.Redis.Password,
 		apiConfig.Redis.DB,
 	)
-	defer inventory.Close()
-	if err := inventory.Ping(ctx); err != nil {
+	defer ticketCache.Close()
+	if err := ticketCache.Ping(ctx); err != nil {
 		slog.Error("cannot initialize redis", "error", err)
 		os.Exit(1)
 	}
+	eventCache := redis.NewEventCache(
+		apiConfig.Redis.Address,
+		apiConfig.Redis.Password,
+		apiConfig.Redis.DB,
+	)
+	defer eventCache.Close()
 	publisher := kafka.NewTicketPublisher(apiConfig.Kafka.Brokers, apiConfig.Kafka.Topic)
 	defer publisher.Close()
 
 	eventStore := repositoryimpl.NewEventRepository(db)
 	eventHandler := handler.NewEventHandler(eventStore)
-	ticketHandler := handler.NewTicketHandler(inventory, publisher)
+	ticketHandler := handler.NewTicketHandler(ticketCache, eventCache, publisher)
 	server := &http.Server{
 		Addr:              apiConfig.Server.Address,
 		Handler:           api.NewHandler(eventHandler, ticketHandler),

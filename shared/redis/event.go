@@ -6,16 +6,12 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/google/uuid"
 	goredis "github.com/redis/go-redis/v9"
 
 	"ticket/shared/model/entity"
 )
 
-const (
-	eventKeyPrefix = "events:"
-	orderKeyPrefix = "tickets:"
-)
+const eventKeyPrefix = "events:"
 
 type EventCache struct {
 	client *goredis.Client
@@ -25,6 +21,21 @@ func NewEventCache(address, password string, database int) *EventCache {
 	return &EventCache{client: goredis.NewClient(&goredis.Options{
 		Addr: address, Password: password, DB: database,
 	})}
+}
+
+func (cache *EventCache) GetEventByID(ctx context.Context, eventID int64) (entity.Event, error) {
+	encoded, err := cache.client.Get(ctx, EventKey(eventID)).Result()
+	if err != nil {
+		if err == goredis.Nil {
+			return entity.Event{}, nil
+		}
+		return entity.Event{}, fmt.Errorf("get event %d from redis: %w", eventID, err)
+	}
+	var event entity.Event
+	if err := json.Unmarshal([]byte(encoded), &event); err != nil {
+		return entity.Event{}, fmt.Errorf("decode event %d from redis: %w", eventID, err)
+	}
+	return event, nil
 }
 
 func (cache *EventCache) GetEvents(ctx context.Context, eventIDs []int64) (map[int64]entity.Event, error) {
@@ -78,48 +89,10 @@ func (cache *EventCache) SetEvents(ctx context.Context, events []entity.Event) e
 	return nil
 }
 
-// SetOrders stores the complete order snapshot and its client-order lookup atomically.
-// A completed order overwrites the pending snapshot under the same order ID.
-func (cache *EventCache) SetOrders(
-	ctx context.Context,
-	pendingOrders []entity.Ticket,
-	doneOrders []entity.TicketDone,
-) error {
-	if len(pendingOrders) == 0 && len(doneOrders) == 0 {
-		return nil
-	}
-
-	pipe := cache.client.TxPipeline()
-	for _, order := range pendingOrders {
-		encoded, err := json.Marshal(order)
-		if err != nil {
-			return fmt.Errorf("encode order %s for redis: %w", order.ID, err)
-		}
-		pipe.Set(ctx, OrderKey(order.ID), encoded, 0)
-		pipe.Set(ctx, ClientOrderIDKey(order.UserID, order.ClientOrderID), order.ID.String(), 0)
-	}
-	for _, order := range doneOrders {
-		encoded, err := json.Marshal(order)
-		if err != nil {
-			return fmt.Errorf("encode order %s for redis: %w", order.ID, err)
-		}
-		pipe.Set(ctx, OrderKey(order.ID), encoded, 0)
-		pipe.Set(ctx, ClientOrderIDKey(order.UserID, order.ClientOrderID), order.ID.String(), 0)
-	}
-	if _, err := pipe.Exec(ctx); err != nil {
-		return fmt.Errorf("set orders in redis: %w", err)
-	}
-	return nil
-}
-
 func (cache *EventCache) Close() error {
 	return cache.client.Close()
 }
 
 func EventKey(eventID int64) string {
 	return eventKeyPrefix + strconv.FormatInt(eventID, 10)
-}
-
-func OrderKey(orderID uuid.UUID) string {
-	return orderKeyPrefix + orderID.String()
 }

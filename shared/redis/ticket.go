@@ -2,66 +2,117 @@ package redis
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 
+	"github.com/google/uuid"
 	goredis "github.com/redis/go-redis/v9"
+
+	"ticket/shared/model/entity"
 )
 
 const (
 	reservedTicketKeyPrefix = "tickets:reserved:"
 	clientOrderIDKeyPrefix  = "tickets:client-order-id:"
+	orderKeyPrefix          = "tickets:"
 )
 
-type TicketInventory struct {
+type TicketCache struct {
 	client *goredis.Client
 }
 
-func NewTicketInventory(address, password string, database int) *TicketInventory {
-	return &TicketInventory{client: goredis.NewClient(&goredis.Options{
+func NewTicketCache(address, password string, database int) *TicketCache {
+	return &TicketCache{client: goredis.NewClient(&goredis.Options{
 		Addr:     address,
 		Password: password,
 		DB:       database,
 	})}
 }
 
-func (inventory *TicketInventory) Ping(ctx context.Context) error {
-	if err := inventory.client.Ping(ctx).Err(); err != nil {
+func (cache *TicketCache) Ping(ctx context.Context) error {
+	if err := cache.client.Ping(ctx).Err(); err != nil {
 		return fmt.Errorf("ping redis: %w", err)
 	}
 	return nil
 }
 
-func (inventory *TicketInventory) HasAvailable(ctx context.Context, eventID int64) (bool, error) {
-	remaining, err := inventory.client.Get(ctx, ReservedTicketKey(eventID)).Int64()
-	if err != nil {
-		if err == goredis.Nil {
-			return false, nil
-		}
-		return false, fmt.Errorf("check reserved tickets in redis: %w", err)
-	}
-	return remaining > 0, nil
-}
-
-func (inventory *TicketInventory) ClientOrderIDExists(
+func (cache *TicketCache) GetOrderID(
 	ctx context.Context,
 	userID int64,
 	clientOrderID string,
-) (bool, error) {
-	created, err := inventory.client.SetNX(
-		ctx,
-		ClientOrderIDKey(userID, clientOrderID),
-		"pending",
-		0,
-	).Result()
+) (uuid.UUID, error) {
+	value, err := cache.client.Get(ctx, ClientOrderIDKey(userID, clientOrderID)).Result()
 	if err != nil {
-		return false, fmt.Errorf("claim client order id in redis: %w", err)
+		if err == goredis.Nil {
+			return uuid.Nil, nil
+		}
+		return uuid.Nil, fmt.Errorf("get order id from redis: %w", err)
 	}
-	return !created, nil
+	// Older API versions claimed this key with a temporary value before publishing.
+	if value == "pending" {
+		return uuid.Nil, nil
+	}
+	orderID, err := uuid.Parse(value)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("decode order id from redis: %w", err)
+	}
+	return orderID, nil
 }
 
-func (inventory *TicketInventory) Close() error {
-	return inventory.client.Close()
+func (cache *TicketCache) SetOrderID(
+	ctx context.Context,
+	userID int64,
+	clientOrderID string,
+	orderID uuid.UUID,
+) error {
+	if err := cache.client.Set(
+		ctx,
+		ClientOrderIDKey(userID, clientOrderID),
+		orderID.String(),
+		0,
+	).Err(); err != nil {
+		return fmt.Errorf("set order id in redis: %w", err)
+	}
+	return nil
+}
+
+// SetTicket stores complete ticket snapshots and their client-order lookups atomically.
+// A completed order overwrites the pending snapshot under the same order ID.
+func (cache *TicketCache) SetTicket(
+	ctx context.Context,
+	pendingOrders []entity.Ticket,
+	doneOrders []entity.TicketDone,
+) error {
+	if len(pendingOrders) == 0 && len(doneOrders) == 0 {
+		return nil
+	}
+
+	pipe := cache.client.TxPipeline()
+	for _, order := range pendingOrders {
+		encoded, err := json.Marshal(order)
+		if err != nil {
+			return fmt.Errorf("encode order %s for redis: %w", order.ID, err)
+		}
+		pipe.Set(ctx, OrderKey(order.ID), encoded, 0)
+		pipe.Set(ctx, ClientOrderIDKey(order.UserID, order.ClientOrderID), order.ID.String(), 0)
+	}
+	for _, order := range doneOrders {
+		encoded, err := json.Marshal(order)
+		if err != nil {
+			return fmt.Errorf("encode order %s for redis: %w", order.ID, err)
+		}
+		pipe.Set(ctx, OrderKey(order.ID), encoded, 0)
+		pipe.Set(ctx, ClientOrderIDKey(order.UserID, order.ClientOrderID), order.ID.String(), 0)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("set orders in redis: %w", err)
+	}
+	return nil
+}
+
+func (cache *TicketCache) Close() error {
+	return cache.client.Close()
 }
 
 func ReservedTicketKey(eventID int64) string {
@@ -70,4 +121,8 @@ func ReservedTicketKey(eventID int64) string {
 
 func ClientOrderIDKey(userID int64, clientOrderID string) string {
 	return clientOrderIDKeyPrefix + strconv.FormatInt(userID, 10) + ":" + clientOrderID
+}
+
+func OrderKey(orderID uuid.UUID) string {
+	return orderKeyPrefix + orderID.String()
 }
